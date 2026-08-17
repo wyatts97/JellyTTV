@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Reflection;
 using Jellyfin.Plugin.JellyTTV.Configuration;
 using MediaBrowser.Common.Configuration;
@@ -37,7 +34,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         _logger = logger;
         Instance = this;
 
-        ConfigurationUpdated += OnConfigurationUpdated;
+        ConfigurationChanged += OnConfigurationChanged;
 
         TryInjectScript();
     }
@@ -67,7 +64,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         };
     }
 
-    private void OnConfigurationUpdated(object? sender, PluginConfiguration e)
+    private void OnConfigurationChanged(object? sender, BasePluginConfiguration e)
     {
         _logger.LogInformation("Configuration updated, re-injecting script");
         TryInjectScript();

@@ -8,7 +8,7 @@
         "overview": "Companion plugin for JellyTTV that integrates Twitch live streams into Jellyfin's navigation and home screen.",
         "versions": [
             {
-                "checksum": "",
+                "checksum": "DB2F9B02CEA5BCFBFF29149125F595B6",
                 "changelog": "Initial release. Sidebar nav link, home screen section, live notifications, thumbnail/avatar proxy.",
                 "targetAbi": "10.10.0.0",
                 "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.1.0/jellyttv-v0.1.0.zip",
