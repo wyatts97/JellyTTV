@@ -24,7 +24,7 @@ channels** (with a real EPG), and past broadcasts as **episodes** of a per-chann
 ## Quick start
 
 ```bash
-git clone https://github.com/yourname/jellyttv.git
+git clone https://github.com/wyatts97/jellyttv.git
 cd jellyttv
 cp .env.example .env
 
