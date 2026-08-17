@@ -22,6 +22,12 @@
     color: #9146FF;
 }
 
+.jellyttv-nav-icon .jellyttv-icon {
+    width: 24px;
+    height: 24px;
+    vertical-align: middle;
+}
+
 .jellyttv-nav-badge {
     display: none;
     background: #e53635;

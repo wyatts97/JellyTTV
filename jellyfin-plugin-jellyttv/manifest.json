@@ -6,9 +6,10 @@
         "description": "Displays Twitch live streams in Jellyfin's web UI with a dedicated sidebar link and home screen section.",
         "owner": "JellyTTV",
         "overview": "Companion plugin for JellyTTV that integrates Twitch live streams into Jellyfin's navigation and home screen.",
+        "imagePath": "icon-512.png",
         "versions": [
             {
-                "checksum": "DB2F9B02CEA5BCFBFF29149125F595B6",
+                "checksum": "2EFC0C755835856846A1359F6A3F142A",
                 "changelog": "Initial release. Sidebar nav link, home screen section, live notifications, thumbnail/avatar proxy.",
                 "targetAbi": "10.10.0.0",
                 "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.1.0/jellyttv-v0.1.0.zip",

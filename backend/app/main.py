@@ -96,6 +96,41 @@ if static_dir.is_dir():
             return FileResponse(path)
         return JSONResponse(status_code=404, content={"detail": "not found"})
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon_ico():  # pragma: no cover
+        path = static_dir / "favicon.ico"
+        if path.exists():
+            return FileResponse(path, media_type="image/x-icon")
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/apple-touch-icon.png", include_in_schema=False)
+    async def apple_touch_icon():  # pragma: no cover
+        path = static_dir / "apple-touch-icon.png"
+        if path.exists():
+            return FileResponse(path, media_type="image/png")
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    async def webmanifest():  # pragma: no cover
+        path = static_dir / "manifest.webmanifest"
+        if path.exists():
+            return FileResponse(path, media_type="application/manifest+json")
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/icon-{size}.png", include_in_schema=False)
+    async def icon_png(size: str):  # pragma: no cover
+        path = static_dir / f"icon-{size}.png"
+        if path.exists():
+            return FileResponse(path, media_type="image/png")
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/icon-{size}-maskable.png", include_in_schema=False)
+    async def icon_maskable_png(size: str):  # pragma: no cover
+        path = static_dir / f"icon-{size}-maskable.png"
+        if path.exists():
+            return FileResponse(path, media_type="image/png")
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         # Anything that is not an API/tuner route falls through to the SPA so

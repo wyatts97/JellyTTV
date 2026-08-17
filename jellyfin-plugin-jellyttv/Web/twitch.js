@@ -152,7 +152,15 @@
                 link.setAttribute('data-role', 'button');
                 link.innerHTML =
                     '<span class="navLinkOption jellyttv-nav-icon">' +
-                    '<span class="material-icons jellyttv-icon">live_tv</span>' +
+                    '<svg class="jellyttv-icon" width="24" height="24" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+                    '<defs><linearGradient id="jttv-grad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">' +
+                    '<stop stop-color="#a970ff"/><stop offset="1" stop-color="#00a4dc"/>' +
+                    '</linearGradient></defs>' +
+                    '<rect width="64" height="64" rx="14" fill="url(#jttv-grad)"/>' +
+                    '<path d="M16 14h32v22l-9 9h-8l-6 6h-5v-6h-4V14Z" fill="#fff" opacity=".92"/>' +
+                    '<rect x="30" y="21" width="4" height="11" rx="2" fill="#4b1f9c"/>' +
+                    '<rect x="39" y="21" width="4" height="11" rx="2" fill="#4b1f9c"/>' +
+                    '</svg>' +
                     '</span>' +
                     '<span class="navLinkText">Twitch</span>' +
                     '<span class="jellyttv-nav-badge" style="display:none;">0</span>';

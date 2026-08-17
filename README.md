@@ -1,5 +1,9 @@
 # JellyTTV
 
+<p align="center">
+  <img src="backend/app/icons/icon-512.png" width="128" height="128" alt="JellyTTV" />
+</p>
+
 Self-hosted bridge that makes Twitch channels appear inside Jellyfin — live streams as **Live TV
 channels** (with a real EPG), and past broadcasts as **episodes** of a per-channel series.
 
