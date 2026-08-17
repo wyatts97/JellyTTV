@@ -120,6 +120,40 @@ docker compose --profile with-jellyfin up -d   # all-in-one demo, brings its own
 
 ---
 
+## Jellyfin Plugin (optional)
+
+JellyTTV ships with an optional companion plugin that adds Twitch live streams directly to
+Jellyfin's sidebar navigation and home screen — with live thumbnails, viewer counts, and
+go-live notifications. No more digging through Live TV to see who's streaming.
+
+### Install from the Jellyfin catalog
+
+1. Open **Jellyfin → Dashboard → Plugins → Repositories**
+2. Click **+** and add:
+   ```
+   https://raw.githubusercontent.com/wyatts97/JellyTTV/main/jellyfin-plugin-jellyttv/manifest.json
+   ```
+3. Go to the **Catalog** tab, search for **JellyTTV**, and install it
+4. Restart Jellyfin
+5. Open **Dashboard → Plugins → JellyTTV** and enter your JellyTTV backend URL
+   (e.g. `http://jellyttv-api:8730`)
+6. Hard-refresh your browser (Ctrl+Shift+R)
+
+You'll now see a **Twitch** link in the sidebar and a **Live on Twitch** section on your
+home screen showing all currently live streamers.
+
+### Build from source
+
+```bash
+cd jellyfin-plugin-jellyttv
+dotnet publish -c Release -o bin/publish
+```
+
+Then copy `bin/publish/*` into Jellyfin's plugin directory
+(`~/.local/share/jellyfin/plugins/JellyTTV/` on Linux) and restart.
+
+---
+
 ## Documentation
 
 - **[Jellyfin setup](docs/jellyfin-setup.md)** — tuner, guide, and the library settings that matter
