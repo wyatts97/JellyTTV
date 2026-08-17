@@ -1,0 +1,56 @@
+name: Build and Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build plugin
+        run: |
+          cd jellyfin-plugin-jellyttv
+          dotnet publish -c Release -o bin/publish
+
+      - name: Create zip
+        run: |
+          cd jellyfin-plugin-jellyttv/bin/publish
+          zip -r "../../../jellyttv-${{ github.ref_name }}.zip" .
+
+      - name: Compute checksum
+        id: checksum
+        run: |
+          checksum=$(md5sum jellyttv-${{ github.ref_name }}.zip | awk '{print $1}')
+          echo "checksum=$checksum" >> $GITHUB_OUTPUT
+
+      - name: Update manifest checksum
+        run: |
+          python3 -c "
+          import json
+          with open('jellyfin-plugin-jellyttv/manifest.json', 'r') as f:
+              manifest = json.load(f)
+          manifest[0]['versions'][0]['checksum'] = '${{ steps.checksum.outputs.checksum }}'
+          manifest[0]['versions'][0]['sourceUrl'] = 'https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/jellyttv-${{ github.ref_name }}.zip'
+          manifest[0]['versions'][0]['timestamp'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+          with open('jellyfin-plugin-jellyttv/manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=4)
+          "
+
+      - name: Upload manifest to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            jellyttv-${{ github.ref_name }}.zip
+            jellyfin-plugin-jellyttv/manifest.json
+          generate_release_notes: true

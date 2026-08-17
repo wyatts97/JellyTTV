@@ -97,9 +97,14 @@ services:
       - jellyfin_config:/config
       - jellyfin_cache:/cache
       - ${MEDIA_ROOT:-./data/media}:/media/twitch:ro
-      # Optional: mount the JellyTTV Jellyfin plugin (build it first with
+      # Optional: mount the JellyTTV Jellyfin plugin.
+      # Option 1 — Build locally and mount:
       #   cd jellyfin-plugin-jellyttv && dotnet publish -c Release -o bin/publish
-      # then uncomment the line below and restart Jellyfin)
+      #   then uncomment the line below and restart Jellyfin
+      # Option 2 — Install from Jellyfin plugin catalog:
+      #   Dashboard → Plugins → Repositories → add manifest URL:
+      #   https://raw.githubusercontent.com/USER/JellyTTV/main/jellyfin-plugin-jellyttv/manifest.json
+      #   then install "JellyTTV" from the Catalog tab and restart
       # - ./jellyfin-plugin-jellyttv/bin/publish:/config/plugins/JellyTTV
     environment:
       TZ: ${TZ:-UTC}
