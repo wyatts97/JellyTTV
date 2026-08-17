@@ -1,10 +1,11 @@
 using System;
-using System.Net.Mime;
+using System.Net.Http;
 using Jellyfin.Plugin.JellyTTV.Services;
 using MediaBrowser.Common.Api;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyTTV.Controllers;
 
@@ -17,10 +18,14 @@ namespace Jellyfin.Plugin.JellyTTV.Controllers;
 public class TwitchController : ControllerBase
 {
     private readonly JellyTTVClient _client;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<TwitchController> _logger;
 
-    public TwitchController(JellyTTVClient client)
+    public TwitchController(JellyTTVClient client, IHttpClientFactory httpClientFactory, ILogger<TwitchController> logger)
     {
         _client = client;
+        _httpClientFactory = httpClientFactory;
+        _logger = logger;
     }
 
     /// <summary>
@@ -72,6 +77,39 @@ public class TwitchController : ControllerBase
         }
 
         return File(image.Value.Data, image.Value.ContentType);
+    }
+
+    /// <summary>
+    /// Tests connectivity to a JellyTTV backend URL from the server side.
+    /// </summary>
+    [HttpGet("TestConnection")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> TestConnection([FromQuery] string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return BadRequest(new { error = "URL is required" });
+        }
+
+        try
+        {
+            var baseUrl = url.TrimEnd('/');
+            var client = _httpClientFactory.CreateClient("JellyTTV");
+            client.Timeout = TimeSpan.FromSeconds(10);
+
+            var response = await client.GetAsync($"{baseUrl}/api/live").ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                return Ok(new { success = true, message = "Connected successfully" });
+            }
+
+            return StatusCode(503, new { success = false, error = $"Server responded with status {response.StatusCode}" });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(503, new { success = false, error = ex.Message });
+        }
     }
 
     /// <summary>

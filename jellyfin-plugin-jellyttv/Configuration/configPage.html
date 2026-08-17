@@ -112,13 +112,15 @@
                     resultEl.textContent = 'Testing...';
                     resultEl.style.color = '';
 
-                    fetch(url + '/api/live')
-                        .then(function (res) {
-                            if (res.ok) {
+                    var apiUrl = ApiClient.serverAddress() + '/JellyTTV/TestConnection?url=' + encodeURIComponent(url);
+                    fetch(apiUrl, { headers: { 'Authorization': ApiClient.getCurrentAccessToken() ? ('MediaBrowser Token="' + ApiClient.getCurrentAccessToken() + '"') : '' } })
+                        .then(function (res) { return res.json(); })
+                        .then(function (data) {
+                            if (data.success) {
                                 resultEl.textContent = '✓ Connected successfully to JellyTTV';
                                 resultEl.style.color = '#4caf50';
                             } else {
-                                resultEl.textContent = '✗ Server responded with status ' + res.status;
+                                resultEl.textContent = '✗ Could not reach JellyTTV: ' + (data.error || 'unknown error');
                                 resultEl.style.color = '#f44336';
                             }
                         })
