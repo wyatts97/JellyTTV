@@ -150,6 +150,11 @@ async def poll_live(ctx: dict[str, Any]) -> dict[str, bool]:
                 )
     if changed:
         await event_bus.publish("channels.changed", {})
+        await enqueue(
+            "jellyfin_refresh_guide",
+            job_id="jellyfin_refresh_guide",
+            defer_seconds=5,
+        )
     return changed
 
 
@@ -161,6 +166,7 @@ async def handle_stream_online(ctx: dict[str, Any], channel_id: int) -> None:
             return
         await channel_service.poll_live_state(session, settings, [channel])
     await event_bus.publish("channels.changed", {})
+    await enqueue("jellyfin_refresh_guide", job_id="jellyfin_refresh_guide", defer_seconds=5)
 
 
 async def handle_stream_offline(ctx: dict[str, Any], channel_id: int) -> None:
@@ -171,6 +177,7 @@ async def handle_stream_offline(ctx: dict[str, Any], channel_id: int) -> None:
         await channel_service.mark_offline(session, channel)
         mode = channel.vod_mode
     await event_bus.publish("channels.changed", {})
+    await enqueue("jellyfin_refresh_guide", job_id="jellyfin_refresh_guide", defer_seconds=5)
     if mode is not VodMode.off:
         await enqueue(
             "sync_vods", channel_id, job_id=f"sync_vods:{channel_id}:offline", defer_seconds=900
@@ -342,6 +349,32 @@ async def jellyfin_refresh(ctx: dict[str, Any]) -> dict[str, Any]:
         job.message = f"refreshed ({scope})"
     await event_bus.publish("jellyfin.refreshed", {"scope": scope})
     return {"scope": scope}
+
+
+async def jellyfin_refresh_guide(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Trigger Jellyfin's 'Refresh Guide' scheduled task.
+
+    This forces Jellyfin to re-download the XMLTV file and update Live TV
+    programme data, so go-live / go-offline changes appear immediately
+    instead of waiting for Jellyfin's default 24h refresh interval.
+    """
+    async with job_record("jellyfin_refresh_guide") as job:
+        async with session_scope() as session:
+            settings = await get_settings(session)
+            if not settings.jellyfin_configured:
+                job.message = "Jellyfin is not configured"
+                return {"skipped": True}
+            base = settings.row.jellyfin_url or ""
+            key = settings.jellyfin_api_key or ""
+        try:
+            async with JellyfinClient(base, key) as client:
+                await client.refresh_guide()
+        except JellyfinError as exc:
+            job.message = str(exc)
+            raise
+        job.message = "guide refresh triggered"
+    await event_bus.publish("jellyfin.guide_refreshed", {})
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------- maintenance

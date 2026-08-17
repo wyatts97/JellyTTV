@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>JellyTTV</title>
+</head>
+<body>
+    <div data-role="page" class="page type-interior pluginConfigurationPage JellyTTVConfigPage" data-require="emby-button,emby-input,emby-checkbox,emby-select">
+
+        <div data-role="content">
+            <div class="content-primary">
+                <form class="JellyTTVConfigForm">
+                    <div class="verticalSection">
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <h2 class="sectionTitle">JellyTTV</h2>
+                        </div>
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <p class="sectionDescription" style="margin-top: 0.5em;">
+                                Configure the connection to your JellyTTV backend. The plugin will fetch live Twitch streams and display them in Jellyfin's sidebar and home screen.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>Connection</h3>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="JellyTTVUrl">JellyTTV Backend URL</label>
+                            <input is="emby-input" type="text" id="JellyTTVUrl" placeholder="http://jellyttv-api:8730" />
+                            <div class="fieldDescription">The base URL of your JellyTTV instance as reachable from Jellyfin.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="ApiKey">API Key (optional)</label>
+                            <input is="emby-input" type="password" id="ApiKey" placeholder="" />
+                            <div class="fieldDescription">Only needed if your JellyTTV instance requires authentication.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <button is="emby-button" type="button" class="raised block" id="TestConnectionBtn">
+                                Test Connection
+                            </button>
+                            <div id="TestResult" class="fieldDescription" style="margin-top: 0.5em;"></div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h3>Display Options</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="EnableSidebarLink" />
+                                <span>Show "Twitch" in sidebar navigation</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="EnableHomeSection" />
+                                <span>Show "Live on Twitch" section on home screen</span>
+                            </label>
+                        </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="EnableNotifications" />
+                                <span>Show notifications when streamers go live</span>
+                            </label>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="RefreshIntervalSeconds">Refresh Interval (seconds)</label>
+                            <input is="emby-input" type="number" id="RefreshIntervalSeconds" min="10" max="600" value="60" />
+                            <div class="fieldDescription">How often to poll JellyTTV for live channel updates (10-600 seconds).</div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                var pluginId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+
+                function loadConfig() {
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        document.getElementById('JellyTTVUrl').value = config.JellyTTVUrl || '';
+                        document.getElementById('ApiKey').value = config.ApiKey || '';
+                        document.getElementById('EnableSidebarLink').checked = config.EnableSidebarLink !== false;
+                        document.getElementById('EnableHomeSection').checked = config.EnableHomeSection !== false;
+                        document.getElementById('EnableNotifications').checked = config.EnableNotifications !== false;
+                        document.getElementById('RefreshIntervalSeconds').value = config.RefreshIntervalSeconds || 60;
+                    });
+                }
+
+                function saveConfig() {
+                    var config = {
+                        JellyTTVUrl: document.getElementById('JellyTTVUrl').value,
+                        ApiKey: document.getElementById('ApiKey').value,
+                        EnableSidebarLink: document.getElementById('EnableSidebarLink').checked,
+                        EnableHomeSection: document.getElementById('EnableHomeSection').checked,
+                        EnableNotifications: document.getElementById('EnableNotifications').checked,
+                        RefreshIntervalSeconds: parseInt(document.getElementById('RefreshIntervalSeconds').value, 10) || 60
+                    };
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function () {
+                        Dashboard.alert('JellyTTV settings saved. Refresh your browser to see changes.');
+                    });
+                }
+
+                function testConnection() {
+                    var url = document.getElementById('JellyTTVUrl').value.trim().replace(/\/+$/, '');
+                    var resultEl = document.getElementById('TestResult');
+                    resultEl.textContent = 'Testing...';
+                    resultEl.style.color = '';
+
+                    fetch(url + '/api/live')
+                        .then(function (res) {
+                            if (res.ok) {
+                                resultEl.textContent = '✓ Connected successfully to JellyTTV';
+                                resultEl.style.color = '#4caf50';
+                            } else {
+                                resultEl.textContent = '✗ Server responded with status ' + res.status;
+                                resultEl.style.color = '#f44336';
+                            }
+                        })
+                        .catch(function (err) {
+                            resultEl.textContent = '✗ Could not reach JellyTTV: ' + err.message;
+                            resultEl.style.color = '#f44336';
+                        });
+                }
+
+                document.querySelector('.JellyTTVConfigPage').addEventListener('pageshow', loadConfig);
+                document.querySelector('.JellyTTVConfigForm').addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    saveConfig();
+                });
+                document.getElementById('TestConnectionBtn').addEventListener('click', testConnection);
+            })();
+        </script>
+    </div>
+</body>
+</html>

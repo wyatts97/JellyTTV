@@ -30,6 +30,7 @@ FUNCTIONS = [
     tasks.publish_channel_by_login,
     tasks.publish_all,
     tasks.jellyfin_refresh,
+    tasks.jellyfin_refresh_guide,
     tasks.refresh_artwork,
     tasks.token_maintenance,
     tasks.prune_jobs,

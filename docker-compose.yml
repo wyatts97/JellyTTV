@@ -97,6 +97,10 @@ services:
       - jellyfin_config:/config
       - jellyfin_cache:/cache
       - ${MEDIA_ROOT:-./data/media}:/media/twitch:ro
+      # Optional: mount the JellyTTV Jellyfin plugin (build it first with
+      #   cd jellyfin-plugin-jellyttv && dotnet publish -c Release -o bin/publish
+      # then uncomment the line below and restart Jellyfin)
+      # - ./jellyfin-plugin-jellyttv/bin/publish:/config/plugins/JellyTTV
     environment:
       TZ: ${TZ:-UTC}
 

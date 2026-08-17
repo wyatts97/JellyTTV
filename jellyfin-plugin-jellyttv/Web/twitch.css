@@ -1,0 +1,283 @@
+/* JellyTTV Plugin — Styles
+   Jellyfin-native blend: uses existing card sizing, adds Twitch-specific touches */
+
+/* ── Sidebar Nav Link ─────────────────────────────────────── */
+
+.jellyttv-nav-link {
+    display: flex;
+    align-items: center;
+    padding: 0.7em 0.8em;
+    cursor: pointer;
+    color: inherit;
+    text-decoration: none;
+    transition: background-color 0.15s ease;
+}
+
+.jellyttv-nav-link:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.jellyttv-nav-icon .material-icons {
+    font-size: 1.4em;
+    color: #9146FF;
+}
+
+.jellyttv-nav-badge {
+    display: none;
+    background: #e53635;
+    color: #fff;
+    font-size: 0.7em;
+    font-weight: 700;
+    border-radius: 10px;
+    padding: 1px 6px;
+    margin-left: auto;
+    min-width: 18px;
+    text-align: center;
+}
+
+/* ── Home Screen Section ──────────────────────────────────── */
+
+.jellyttv-home-section {
+    margin-bottom: 1.5em;
+}
+
+.jellyttv-section-icon {
+    color: #9146FF;
+}
+
+.jellyttv-cards-row {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 0.8em;
+    padding-bottom: 0.5em;
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+}
+
+.jellyttv-cards-row::-webkit-scrollbar {
+    height: 6px;
+}
+
+.jellyttv-cards-row::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+/* ── Twitch Page ──────────────────────────────────────────── */
+
+.jellyttv-page {
+    padding: 1em;
+}
+
+.jellyttv-page-header {
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    margin-bottom: 1.5em;
+}
+
+.jellyttv-page-header h1 {
+    font-size: 1.6em;
+    margin: 0;
+}
+
+.jellyttv-live-count {
+    background: rgba(145, 70, 255, 0.15);
+    color: #9146FF;
+    padding: 0.2em 0.8em;
+    border-radius: 12px;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.jellyttv-page-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1em;
+}
+
+/* ── Card ─────────────────────────────────────────────────── */
+
+.jellyttv-card {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+.jellyttv-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.jellyttv-home-card {
+    min-width: 280px;
+    max-width: 280px;
+    flex-shrink: 0;
+}
+
+.jellyttv-page-card {
+    width: 100%;
+}
+
+/* ── Card Thumbnail ───────────────────────────────────────── */
+
+.jellyttv-card-thumb {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #111;
+    overflow: hidden;
+}
+
+.jellyttv-card-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.jellyttv-card-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+}
+
+.jellyttv-card-placeholder .material-icons {
+    font-size: 2.5em;
+    color: rgba(255, 255, 255, 0.2);
+}
+
+/* ── Live Badge ───────────────────────────────────────────── */
+
+.jellyttv-live-badge {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    background: #e53635;
+    color: #fff;
+    font-size: 0.7em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    animation: jellyttv-pulse 2s ease-in-out infinite;
+}
+
+@keyframes jellyttv-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.85; }
+}
+
+/* ── Viewer Count ─────────────────────────────────────────── */
+
+.jellyttv-viewer-count {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 0.75em;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+}
+
+/* ── Card Info ────────────────────────────────────────────── */
+
+.jellyttv-card-info {
+    display: flex;
+    gap: 0.6em;
+    padding: 0.6em;
+}
+
+.jellyttv-card-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.jellyttv-card-avatar-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(145, 70, 255, 0.2);
+}
+
+.jellyttv-card-avatar-placeholder .material-icons {
+    font-size: 1.2em;
+    color: #9146FF;
+}
+
+.jellyttv-card-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.jellyttv-card-title {
+    font-size: 0.85em;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+}
+
+.jellyttv-card-game {
+    font-size: 0.75em;
+    color: #9146FF;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+}
+
+.jellyttv-card-streamer {
+    font-size: 0.75em;
+    color: rgba(255, 255, 255, 0.5);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Watch Button ─────────────────────────────────────────── */
+
+.jellyttv-card-watch {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3em;
+    width: 100%;
+    padding: 0.5em;
+    border: none;
+    background: rgba(145, 70, 255, 0.12);
+    color: #9146FF;
+    font-size: 0.8em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.jellyttv-card-watch:hover {
+    background: rgba(145, 70, 255, 0.25);
+}
+
+/* ── Empty State ──────────────────────────────────────────── */
+
+.jellyttv-empty {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.9em;
+    padding: 2em;
+    text-align: center;
+    grid-column: 1 / -1;
+}

@@ -28,6 +28,37 @@ async def health() -> dict:
     return {"status": "ok", "version": __version__}
 
 
+@router.get("/live")
+async def live_channels(
+    session: Annotated[AsyncSession, Depends(get_db)]
+) -> dict:
+    """Public endpoint returning live channel data for the Jellyfin plugin.
+
+    No auth required — this only exposes public info (login, title, game, viewers,
+    thumbnail/avatar proxy URLs) and is meant to be consumed by the companion
+    Jellyfin plugin's proxy controller.
+    """
+    rows = await channel_service.list_channels(session)
+    live = [c for c in rows if c.is_live and c.enabled and c.live_enabled]
+    return {
+        "channels": [
+            {
+                "id": c.id,
+                "login": c.twitch_login,
+                "display_name": c.display_name,
+                "is_live": True,
+                "title": c.live_title,
+                "game_name": c.live_game,
+                "viewer_count": c.live_viewers,
+                "thumbnail_url": f"/api/channels/{c.id}/thumbnail" if c.live_thumbnail_url else None,
+                "avatar_url": f"/api/channels/{c.id}/avatar" if c.avatar_url else None,
+                "started_at": iso_z(c.live_started_at),
+            }
+            for c in live
+        ]
+    }
+
+
 @router.get("/dashboard")
 async def dashboard(
     _user: AdminUser, session: Annotated[AsyncSession, Depends(get_db)]

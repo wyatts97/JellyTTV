@@ -159,6 +159,16 @@ class JellyfinClient:
         items = payload.get("Items") or []
         return items[0].get("Id") if items else None
 
+    async def refresh_guide(self) -> None:
+        """Trigger Jellyfin's 'Refresh Guide' scheduled task.
+
+        This forces Jellyfin to re-fetch the XMLTV file and update the Live TV
+        guide data, so channel live/offline state and programme metadata is
+        current without waiting for the default 24h interval.
+        """
+        await self._request("POST", "/ScheduledTasks/Running/RefreshGuide")
+        log.info("triggered jellyfin guide refresh")
+
     async def refresh(self, *, library_id: str | None = None) -> str:
         """Refresh as narrowly as possible; returns what was actually done."""
         if library_id:
