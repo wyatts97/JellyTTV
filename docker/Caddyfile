@@ -1,0 +1,19 @@
+{
+	email {$CADDY_EMAIL}
+}
+
+{$JELLYTTV_DOMAIN} {
+	encode zstd gzip
+
+	# Twitch EventSub callbacks must reach this path over valid HTTPS on :443.
+	handle /eventsub/* {
+		reverse_proxy api:8730
+	}
+
+	handle {
+		reverse_proxy api:8730 {
+			# HLS proxy responses are already short-lived; don't buffer them.
+			flush_interval -1
+		}
+	}
+}

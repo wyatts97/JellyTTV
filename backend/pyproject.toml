@@ -1,0 +1,35 @@
+[project]
+name = "jellyttv"
+version = "0.1.0"
+description = "Bridge Twitch livestreams and VODs into Jellyfin"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM"]
+ignore = [
+  # FastAPI's Depends()/Query() defaults are the documented idiom.
+  "B008",
+  # `str, Enum` (not StrEnum) is what SQLModel/SQLAlchemy column mapping expects.
+  "UP042",
+  # Our subprocess helpers deliberately take a `timeout` and enforce it with
+  # asyncio.wait_for, which is clearer here than an ambient cancel scope.
+  "ASYNC109",
+  # Library writes are small, synchronous file operations done on purpose; the
+  # async-file indirection would add complexity for no measurable benefit.
+  "ASYNC240",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+plugins = []

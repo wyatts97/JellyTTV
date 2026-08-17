@@ -1,0 +1,76 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-ink-950: #08090d;
+  --color-ink-900: #0d0f15;
+  --color-ink-850: #12141c;
+  --color-ink-800: #171a24;
+  --color-ink-700: #212533;
+  --color-ink-600: #2e3345;
+  --color-ink-400: #6b7285;
+  --color-ink-300: #9aa1b4;
+  --color-ink-200: #c8ccd8;
+
+  --color-twitch-400: #b28aff;
+  --color-twitch-500: #a970ff;
+  --color-twitch-600: #8b46ff;
+  --color-jelly-400: #35bdea;
+  --color-jelly-500: #00a4dc;
+
+  --font-sans: 'Inter var', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-ink-200 font-sans antialiased;
+  }
+
+  ::selection {
+    @apply bg-twitch-600/40 text-white;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-twitch-500/70 ring-offset-2 ring-offset-ink-950;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-ink-700 rounded-full border-2 border-solid border-transparent bg-clip-padding;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-600;
+  }
+}
+
+@utility card-surface {
+  @apply bg-ink-900 border border-ink-700/70 rounded-xl;
+}
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+.live-dot {
+  animation: pulse-live 1.6s ease-in-out infinite;
+}

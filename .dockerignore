@@ -1,0 +1,27 @@
+.git
+.github
+.gitignore
+.env
+*.md
+docs/
+
+# Local dev artefacts - these would otherwise bloat the build context enormously
+**/.venv
+**/venv
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+frontend/dist
+backend/app/static
+
+# Runtime data must never end up in an image
+data/
+config/
+media/
+*.db
+*.db-shm
+*.db-wal
+secret.key
