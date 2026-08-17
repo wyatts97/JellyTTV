@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -133,13 +133,13 @@ async def update_channel(
     return _to_out(channel, settings, await _counts(session, channel_id))
 
 
-@router.delete("/{channel_id}", status_code=204)
+@router.delete("/{channel_id}", status_code=204, response_class=Response)
 async def delete_channel(
     channel_id: int,
     _user: AdminUser,
     session: Annotated[AsyncSession, Depends(get_db)],
     delete_files: Annotated[bool, Query(description="Also delete the library folder")] = True,
-) -> None:
+) -> Response:
     channel = await channel_service.get_channel(session, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
