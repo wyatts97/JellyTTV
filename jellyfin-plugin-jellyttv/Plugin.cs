@@ -1,4 +1,4 @@
-using System.Reflection;
+using System;
 using Jellyfin.Plugin.JellyTTV.Configuration;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
@@ -15,8 +15,6 @@ namespace Jellyfin.Plugin.JellyTTV;
 /// </summary>
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
-    private readonly ILogger<Plugin> _logger;
-
     /// <summary>
     /// Gets the singleton plugin instance.
     /// </summary>
@@ -31,12 +29,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         ILogger<Plugin> logger)
         : base(applicationPaths, xmlSerializer)
     {
-        _logger = logger;
         Instance = this;
-
-        ConfigurationChanged += OnConfigurationChanged;
-
-        TryInjectScript();
     }
 
     /// <inheritdoc />
@@ -62,100 +55,5 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
                 EnableInMainMenu = false
             }
         };
-    }
-
-    private void OnConfigurationChanged(object? sender, BasePluginConfiguration e)
-    {
-        _logger.LogInformation("Configuration updated, re-injecting script");
-        TryInjectScript();
-    }
-
-    /// <summary>
-    /// Injects the twitch.js and twitch.css script tags into Jellyfin's index.html.
-    /// Idempotent — skips if already injected.
-    /// </summary>
-    public void TryInjectScript()
-    {
-        try
-        {
-            var indexHtmlPath = FindIndexHtml();
-            if (indexHtmlPath == null)
-            {
-                _logger.LogWarning("Could not find Jellyfin index.html; script injection skipped");
-                return;
-            }
-
-            var html = File.ReadAllText(indexHtmlPath);
-
-            var scriptTag = "<!-- JellyTTV Plugin BEGIN -->";
-            if (html.Contains(scriptTag, StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogDebug("Script already injected, skipping");
-                return;
-            }
-
-            var injection = BuildInjectionHtml();
-            var headEnd = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
-            if (headEnd < 0)
-            {
-                _logger.LogWarning("No </head> tag found in index.html; cannot inject");
-                return;
-            }
-
-            html = html.Insert(headEnd, injection);
-            File.WriteAllText(indexHtmlPath, html);
-            _logger.LogInformation("Successfully injected JellyTTV script into {Path}", indexHtmlPath);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            _logger.LogWarning(ex,
-                "Cannot write to index.html (permission denied). " +
-                "Mount index.html as a volume or install the 'File Transformation' plugin.");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to inject script into index.html");
-        }
-    }
-
-    private string? FindIndexHtml()
-    {
-        var candidates = new[]
-        {
-            Path.Combine(ApplicationPaths.WebPath, "index.html"),
-            "/usr/share/jellyfin/web/index.html",
-            "/var/lib/jellyfin/web/index.html",
-            "/jellyfin/web/index.html",
-            Path.Combine(AppContext.BaseDirectory, "web", "index.html"),
-            Path.Combine(Environment.CurrentDirectory, "web", "index.html")
-        };
-
-        foreach (var path in candidates)
-        {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    return path;
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-
-        return null;
-    }
-
-    private string BuildInjectionHtml()
-    {
-        var version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.1.0";
-        return $@"
-<!-- JellyTTV Plugin BEGIN -->
-<link rel=""stylesheet"" href=""/JellyTTV/twitch.css?v={version}"" />
-<script type=""text/javascript"" src=""/JellyTTV/twitch.js?v={version}""></script>
-<!-- JellyTTV Plugin END -->
-";
     }
 }

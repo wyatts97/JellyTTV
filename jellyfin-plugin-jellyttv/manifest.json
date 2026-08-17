@@ -9,7 +9,7 @@
         "imagePath": "icon-512.png",
         "versions": [
             {
-                "checksum": "E7C2FECDE1C1D7B0C5057AE953681493",
+                "checksum": "C583BBBF1C876D21BD2B97409BF5D7AD",
                 "changelog": "Initial release. Sidebar nav link, home screen section, live notifications, thumbnail/avatar proxy.",
                 "targetAbi": "10.10.0.0",
                 "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.1.0/jellyttv-v0.1.0.zip",

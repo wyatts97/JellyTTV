@@ -1,6 +1,8 @@
 using Jellyfin.Plugin.JellyTTV.Services;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.JellyTTV;
@@ -15,5 +17,6 @@ public class ServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddHttpClient("JellyTTV");
         serviceCollection.AddSingleton<JellyTTVClient>();
+        serviceCollection.AddSingleton<IStartupFilter, JellyTTVStartupFilter>();
     }
 }
