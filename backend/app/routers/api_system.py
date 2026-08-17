@@ -67,7 +67,7 @@ async def dashboard(
                 "game": c.live_game,
                 "viewers": c.live_viewers,
                 "started_at": iso_z(c.live_started_at),
-                "thumbnail_url": f"/api/channels/{c.id}/thumbnail" if c.is_live else None,
+                "thumbnail_url": c.live_thumbnail_url,
                 "avatar_url": c.avatar_url,
             }
             for c in live

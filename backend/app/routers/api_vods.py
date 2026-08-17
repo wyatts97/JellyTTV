@@ -152,11 +152,13 @@ async def vod_thumbnail(
         raise HTTPException(status_code=404, detail="No thumbnail available")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(vod.thumbnail_url)
             resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream thumbnail returned {exc.response.status_code}") from None
     except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="Failed to fetch thumbnail") from None
+        raise HTTPException(status_code=502, detail="failed to fetch thumbnail") from None
 
     return Response(
         content=resp.content,

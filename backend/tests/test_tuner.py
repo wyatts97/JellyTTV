@@ -86,7 +86,7 @@ def test_xmltv_channel_ids_match_the_playlist():
 
 
 def test_xmltv_live_programme_carries_title_game_and_viewers():
-    guide = build_xmltv([_channel("alpha", live=True)], base_url="http://jellyttv:8730", window_hours=12)
+    guide = build_xmltv([_channel("alpha", live=True)], window_hours=12)
     root = ET.fromstring(guide.split("\n", 2)[2])
 
     programmes = root.findall("programme")
@@ -97,11 +97,9 @@ def test_xmltv_live_programme_carries_title_game_and_viewers():
     assert "Just Chatting" in (first.findtext("desc") or "")
     assert "4,321 viewers" in (first.findtext("desc") or "")
     assert first.find("live") is not None
-    # Programme icon should point to our thumbnail proxy, not the raw Twitch CDN URL.
+    # Thumbnail placeholders must be expanded.
     icon = first.find("icon")
-    assert icon is not None
-    assert icon.get("src", "").startswith("http://jellyttv:8730/api/channels/")
-    assert "%{width}" not in (icon.get("src") or "")
+    assert icon is not None and "%{width}" not in (icon.get("src") or "")
 
 
 def test_xmltv_fills_the_whole_window_even_when_offline():

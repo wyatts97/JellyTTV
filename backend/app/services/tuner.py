@@ -18,7 +18,7 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from app.models import Channel
-from app.util import utcnow, xmltv_time
+from app.util import twitch_thumbnail, utcnow, xmltv_time
 
 OFFLINE_PROGRAMME_TITLE = "Offline"
 
@@ -91,21 +91,20 @@ def build_xmltv(
             ET.SubElement(node, "icon", {"src": channel.avatar_url})
         ET.SubElement(node, "url").text = f"https://www.twitch.tv/{channel.twitch_login}"
 
+
     for channel in channels:
         if not channel.enabled or not channel.live_enabled:
             continue
         if not channel.is_live and not include_offline:
             continue
-        _append_programmes(root, channel, now, window_end, base_url)
+        _append_programmes(root, channel, now, window_end)
 
     return '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n' + ET.tostring(
         root, encoding="unicode"
     )
 
 
-def _append_programmes(
-    root: ET.Element, channel: Channel, now, window_end, base_url: str = ""
-) -> None:
+def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> None:
     cursor = now - timedelta(hours=1)
 
     if channel.is_live:
@@ -123,7 +122,7 @@ def _append_programmes(
             title=channel.live_title or f"{channel.display_name} live",
             description=_live_description(channel),
             category=channel.live_game,
-            icon=f"{base_url.rstrip('/')}/api/channels/{channel.id}/thumbnail" if base_url else None,
+            icon=twitch_thumbnail(channel.live_thumbnail_url),
             live=True,
         )
         cursor = live_end

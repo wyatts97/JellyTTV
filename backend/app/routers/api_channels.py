@@ -262,14 +262,45 @@ async def channel_thumbnail(
         raise HTTPException(status_code=404, detail="No thumbnail available")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream thumbnail returned {exc.response.status_code}") from None
     except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="Failed to fetch thumbnail") from None
+        raise HTTPException(status_code=502, detail="failed to fetch thumbnail") from None
 
     return Response(
         content=resp.content,
         media_type=resp.headers.get("content-type", "image/jpeg"),
         headers={"Cache-Control": "max-age=30"},
+    )
+
+
+@router.get("/{channel_id}/avatar", response_class=Response)
+@limiter.limit("60/minute")
+async def channel_avatar(
+    request: Request,
+    channel_id: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    channel = await channel_service.get_channel(session, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if not channel.avatar_url:
+        raise HTTPException(status_code=404, detail="No avatar available")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(channel.avatar_url)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream avatar returned {exc.response.status_code}") from None
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="failed to fetch avatar") from None
+
+    return Response(
+        content=resp.content,
+        media_type=resp.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "max-age=300"},
     )

@@ -171,7 +171,24 @@ async def apply_live_payload(
     channel.live_game = payload.get("game_name") or channel.live_game
     channel.live_viewers = payload.get("viewer_count")
     channel.live_started_at = started_at
-    channel.live_thumbnail_url = twitch_thumbnail(payload.get("thumbnail_url"))
+
+    # Twitch normally sends thumbnail_url in /streams. If it is missing/empty,
+    # synthesise the well-known static-cdn URL from the login so we never show
+    # a blank live card.
+    raw_thumb = payload.get("thumbnail_url")
+    if raw_thumb:
+        channel.live_thumbnail_url = twitch_thumbnail(raw_thumb)
+    elif channel.twitch_login:
+        log.warning(
+            "twitch streams response missing thumbnail_url; synthesising from login",
+            login=channel.twitch_login,
+        )
+        channel.live_thumbnail_url = (
+            f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{channel.twitch_login}-1280x720.jpg"
+        )
+    else:
+        channel.live_thumbnail_url = None
+
     channel.updated_at = utcnow()
     session.add(channel)
 
