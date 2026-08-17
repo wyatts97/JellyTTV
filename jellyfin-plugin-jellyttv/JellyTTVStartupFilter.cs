@@ -17,13 +17,15 @@ namespace Jellyfin.Plugin.JellyTTV;
 public class JellyTTVStartupFilter : IStartupFilter
 {
     private readonly ILogger<JellyTTVStartupFilter> _logger;
+    private readonly JellyTTVScriptManager _scriptManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="JellyTTVStartupFilter"/> class.
     /// </summary>
-    public JellyTTVStartupFilter(ILogger<JellyTTVStartupFilter> logger)
+    public JellyTTVStartupFilter(ILogger<JellyTTVStartupFilter> logger, JellyTTVScriptManager scriptManager)
     {
         _logger = logger;
+        _scriptManager = scriptManager;
     }
 
     /// <inheritdoc />
@@ -33,6 +35,11 @@ public class JellyTTVStartupFilter : IStartupFilter
         {
             app.Use(async (context, nextMiddleware) =>
             {
+                if (_scriptManager.IsExternal)
+                {
+                    await nextMiddleware().ConfigureAwait(false);
+                    return;
+                }
                 var path = context.Request.Path.Value ?? string.Empty;
                 var isIndex = path.EndsWith("/index.html", StringComparison.OrdinalIgnoreCase)
                               || path.Equals("/web", StringComparison.OrdinalIgnoreCase);
@@ -59,20 +66,13 @@ public class JellyTTVStartupFilter : IStartupFilter
                 capture.Seek(0, SeekOrigin.Begin);
                 var html = await new StreamReader(capture, Encoding.UTF8).ReadToEndAsync().ConfigureAwait(false);
 
-                var version = GetType().Assembly.GetName().Version?.ToString() ?? "0.1.0";
                 const string marker = "<!-- JellyTTV Plugin BEGIN -->";
                 if (!html.Contains(marker, StringComparison.OrdinalIgnoreCase))
                 {
                     var headEnd = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
                     if (headEnd >= 0)
                     {
-                        var injection = $@"
-<!-- JellyTTV Plugin BEGIN -->
-<link rel=""stylesheet"" href=""/JellyTTV/twitch.css?v={version}"" />
-<script type=""text/javascript"" src=""/JellyTTV/twitch.js?v={version}""></script>
-<!-- JellyTTV Plugin END -->
-";
-                        html = html.Insert(headEnd, injection);
+                        html = html.Insert(headEnd, JellyTTVScriptManager.GetInjectionHtml());
                         _logger.LogInformation("Injected JellyTTV client into {Path}", path);
                     }
                     else

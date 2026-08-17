@@ -17,6 +17,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
     {
         serviceCollection.AddHttpClient("JellyTTV");
         serviceCollection.AddSingleton<JellyTTVClient>();
+        serviceCollection.AddSingleton<JellyTTVScriptManager>();
         serviceCollection.AddSingleton<IStartupFilter, JellyTTVStartupFilter>();
     }
 }
