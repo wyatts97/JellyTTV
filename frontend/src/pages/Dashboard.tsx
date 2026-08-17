@@ -226,9 +226,22 @@ function LiveCard({ channel }: { channel: LiveChannel }) {
           alt=""
           className="aspect-video w-full object-cover"
           loading="lazy"
+          onError={(e) => {
+            e.currentTarget.style.display = 'none'
+            const fallback = e.currentTarget.nextElementSibling as HTMLElement | null
+            if (fallback) fallback.style.display = ''
+          }}
         />
-      ) : (
+      ) : null}
+      {!channel.thumbnail_url ? (
         <div className="grid aspect-video w-full place-items-center bg-ink-800 text-ink-400">
+          <Radio className="size-6" aria-hidden />
+        </div>
+      ) : (
+        <div
+          className="grid aspect-video w-full place-items-center bg-ink-800 text-ink-400"
+          style={{ display: 'none' }}
+        >
           <Radio className="size-6" aria-hidden />
         </div>
       )}

@@ -187,6 +187,9 @@ function VodRow({
               alt=""
               className="hidden w-24 shrink-0 rounded border border-ink-700 object-cover sm:block"
               loading="lazy"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
             />
           )}
           <div className="min-w-0">

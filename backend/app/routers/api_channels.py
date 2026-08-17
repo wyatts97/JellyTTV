@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import get_config
 from app.db import get_db
 from app.models import Channel, EventLog, EventSubSubscription, StreamSession, Vod, VodMode
+from app.ratelimit import limiter
 from app.schemas import ChannelCreate, ChannelOut, ChannelUpdate, VodOut
 from app.security import AdminUser
 from app.services import channels as channel_service
 from app.services import library, vods
 from app.services.channels import ChannelError
 from app.services.settings_store import ResolvedSettings, get_settings
-from app.util import sanitize_filename, utcnow
+from app.util import sanitize_filename, twitch_thumbnail, utcnow
 from app.worker.queue import enqueue
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -242,3 +244,32 @@ async def preview_paths(
             else None
         ),
     }
+
+
+@router.get("/{channel_id}/thumbnail", response_class=Response)
+@limiter.limit("60/minute")
+async def channel_thumbnail(
+    request: Request,
+    channel_id: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    channel = await channel_service.get_channel(session, channel_id)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    url = twitch_thumbnail(channel.live_thumbnail_url)
+    if not url:
+        raise HTTPException(status_code=404, detail="No thumbnail available")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Failed to fetch thumbnail") from None
+
+    return Response(
+        content=resp.content,
+        media_type=resp.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "max-age=30"},
+    )

@@ -41,6 +41,7 @@ async def guide(session: Annotated[AsyncSession, Depends(get_db)]) -> Response:
     rows = await channel_service.list_channels(session, enabled_only=True)
     body = tuner.build_xmltv(
         rows,
+        base_url=settings.self_base_url,
         window_hours=settings.row.guide_window_hours,
         include_offline=settings.row.tuner_include_offline,
     )

@@ -18,7 +18,7 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from app.models import Channel
-from app.util import twitch_thumbnail, utcnow, xmltv_time
+from app.util import utcnow, xmltv_time
 
 OFFLINE_PROGRAMME_TITLE = "Offline"
 
@@ -62,6 +62,7 @@ def build_m3u(
 def build_xmltv(
     channels: list[Channel],
     *,
+    base_url: str = "",
     window_hours: int = 48,
     include_offline: bool = True,
 ) -> str:
@@ -95,14 +96,16 @@ def build_xmltv(
             continue
         if not channel.is_live and not include_offline:
             continue
-        _append_programmes(root, channel, now, window_end)
+        _append_programmes(root, channel, now, window_end, base_url)
 
     return '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n' + ET.tostring(
         root, encoding="unicode"
     )
 
 
-def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> None:
+def _append_programmes(
+    root: ET.Element, channel: Channel, now, window_end, base_url: str = ""
+) -> None:
     cursor = now - timedelta(hours=1)
 
     if channel.is_live:
@@ -120,7 +123,7 @@ def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> N
             title=channel.live_title or f"{channel.display_name} live",
             description=_live_description(channel),
             category=channel.live_game,
-            icon=twitch_thumbnail(channel.live_thumbnail_url),
+            icon=f"{base_url.rstrip('/')}/api/channels/{channel.id}/thumbnail" if base_url else None,
             live=True,
         )
         cursor = live_end

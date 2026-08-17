@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_db
 from app.models import Channel, Vod, VodMode, VodState
+from app.ratelimit import limiter
 from app.schemas import VodOut
 from app.security import AdminUser
 from app.services import vods as vod_service
@@ -134,3 +136,30 @@ async def skip(
     await session.commit()
     await enqueue("publish_channel", vod.channel_id, job_id=f"publish:{vod.channel_id}")
     return {"ok": True}
+
+
+@router.get("/{vod_id}/thumbnail", response_class=Response)
+@limiter.limit("60/minute")
+async def vod_thumbnail(
+    request: Request,
+    vod_id: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> Response:
+    vod = await session.get(Vod, vod_id)
+    if vod is None:
+        raise HTTPException(status_code=404, detail="VOD not found")
+    if not vod.thumbnail_url:
+        raise HTTPException(status_code=404, detail="No thumbnail available")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(vod.thumbnail_url)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Failed to fetch thumbnail") from None
+
+    return Response(
+        content=resp.content,
+        media_type=resp.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "max-age=300"},
+    )

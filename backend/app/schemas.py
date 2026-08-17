@@ -214,7 +214,7 @@ class VodOut(BaseModel):
             twitch_video_id=vod.twitch_video_id,
             title=vod.title,
             url=vod.url,
-            thumbnail_url=vod.thumbnail_url,
+            thumbnail_url=f"/api/vods/{vod.id or 0}/thumbnail" if vod.thumbnail_url else None,
             published_at=vod.published_at,
             duration_s=vod.duration_s,
             season=vod.season,
