@@ -32,6 +32,7 @@ public class TwitchController : ControllerBase
     /// Gets the list of live Twitch channels from JellyTTV.
     /// </summary>
     [HttpGet("Live")]
+    [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> GetLive()
@@ -49,6 +50,7 @@ public class TwitchController : ControllerBase
     /// Proxies a channel thumbnail image from JellyTTV.
     /// </summary>
     [HttpGet("Thumbnail/{channelId}")]
+    [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetThumbnail(int channelId)
@@ -66,6 +68,7 @@ public class TwitchController : ControllerBase
     /// Proxies a channel avatar image from JellyTTV.
     /// </summary>
     [HttpGet("Avatar/{channelId}")]
+    [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetAvatar(int channelId)
@@ -77,6 +80,24 @@ public class TwitchController : ControllerBase
         }
 
         return File(image.Value.Data, image.Value.ContentType);
+    }
+
+    /// <summary>
+    /// Gets the plugin's display configuration for the client script.
+    /// </summary>
+    [HttpGet("Config")]
+    [AllowAnonymous]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public IActionResult GetConfig()
+    {
+        var config = Plugin.Instance?.Configuration;
+        return Ok(new
+        {
+            enableSidebarLink = config?.EnableSidebarLink ?? true,
+            enableHomeSection = config?.EnableHomeSection ?? true,
+            enableNotifications = config?.EnableNotifications ?? true,
+            refreshIntervalSeconds = config?.RefreshIntervalSeconds ?? 60
+        });
     }
 
     /// <summary>
@@ -116,6 +137,7 @@ public class TwitchController : ControllerBase
     /// Serves the plugin's JavaScript file as an embedded resource.
     /// </summary>
     [HttpGet("twitch.js")]
+    [AllowAnonymous]
     [Produces("application/javascript")]
     public IActionResult GetScript()
     {
@@ -126,6 +148,7 @@ public class TwitchController : ControllerBase
     /// Serves the plugin's CSS file as an embedded resource.
     /// </summary>
     [HttpGet("twitch.css")]
+    [AllowAnonymous]
     [Produces("text/css")]
     public IActionResult GetStyles()
     {

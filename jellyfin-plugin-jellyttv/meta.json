@@ -8,9 +8,9 @@
   "imageUrl": "",
   "versions": [
     {
-      "version": "0.1.0.0",
-      "changelog": "Initial release. Sidebar nav link, home screen section, live notifications.",
-      "targetAbi": "10.10.0.0",
+      "version": "0.2.0.0",
+      "changelog": "Fix script injection, add AllowAnonymous to public endpoints, add /Config endpoint, fix Test Connection URL, support Jellyfin 10.11.x.",
+      "targetAbi": "10.11.0.0",
       "sourceUrl": "",
       "checksum": "",
       "timestamp": "2026-08-17T00:00:00Z"

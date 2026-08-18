@@ -40,24 +40,32 @@ public class JellyTTVStartupFilter : IStartupFilter
                     await nextMiddleware().ConfigureAwait(false);
                     return;
                 }
+
+                // Pre-filter on path only — ContentType isn't available until after downstream middleware runs.
                 var path = context.Request.Path.Value ?? string.Empty;
                 var isIndex = path.EndsWith("/index.html", StringComparison.OrdinalIgnoreCase)
-                              || path.Equals("/web", StringComparison.OrdinalIgnoreCase);
+                              || path.EndsWith("/web", StringComparison.OrdinalIgnoreCase);
 
-                if (!isIndex || !IsHtmlResponse(context))
+                if (!isIndex)
                 {
                     await nextMiddleware().ConfigureAwait(false);
                     return;
                 }
 
+                // Capture the response body by swapping in a MemoryStream.
                 var originalBody = context.Response.Body;
                 await using var capture = new MemoryStream();
                 context.Response.Body = capture;
 
                 await nextMiddleware().ConfigureAwait(false);
 
-                if (context.Response.StatusCode != 200)
+                // Now that downstream middleware has run, we can check ContentType and status.
+                var contentType = context.Response.ContentType;
+                var isHtml = contentType != null && contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase);
+
+                if (context.Response.StatusCode != 200 || !isHtml)
                 {
+                    // Not an HTML 200 response — pass through unchanged.
                     await CopyToOriginalAsync(capture, originalBody).ConfigureAwait(false);
                     context.Response.Body = originalBody;
                     return;
@@ -89,17 +97,6 @@ public class JellyTTVStartupFilter : IStartupFilter
 
             next(app);
         };
-    }
-
-    private static bool IsHtmlResponse(HttpContext context)
-    {
-        if (context.Response.HasStarted)
-        {
-            return false;
-        }
-
-        var contentType = context.Response.ContentType;
-        return contentType != null && contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task CopyToOriginalAsync(Stream source, Stream destination)

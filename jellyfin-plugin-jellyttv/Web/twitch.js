@@ -70,17 +70,19 @@
 
         fetchConfig: function () {
             var self = this;
-            return fetch(basePath + 'Live', { headers: { 'Accept': 'application/json' } })
+            return fetch(basePath + 'Config', { headers: { 'Accept': 'application/json' } })
                 .then(function (res) { return res.ok ? res.json() : null; })
                 .then(function (data) {
-                    // Config is derived from what the plugin returns alongside live data.
-                    // For now, use sensible defaults — the plugin C# side controls caching.
-                    self.config = {
-                        EnableSidebarLink: true,
-                        EnableHomeSection: true,
-                        EnableNotifications: true,
-                        RefreshIntervalSeconds: 60
-                    };
+                    if (data) {
+                        self.config = {
+                            EnableSidebarLink: data.enableSidebarLink !== false,
+                            EnableHomeSection: data.enableHomeSection !== false,
+                            EnableNotifications: data.enableNotifications !== false,
+                            RefreshIntervalSeconds: data.refreshIntervalSeconds || 60
+                        };
+                    } else {
+                        self.config = null;
+                    }
                     return data;
                 })
                 .catch(function () {
