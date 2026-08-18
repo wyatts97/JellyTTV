@@ -7,6 +7,24 @@
 (function () {
     'use strict';
 
+    // Avoid double-initialization if the script is injected more than once.
+    if (window.JellyTTV) {
+        return;
+    }
+
+    // Resolve the JellyTTV base path from this script's URL so the plugin works
+    // behind a Jellyfin base URL or reverse-proxy subpath.
+    var currentScript = document.currentScript;
+    var basePath = '/JellyTTV/';
+    if (currentScript && currentScript.src) {
+        try {
+            var scriptUrl = currentScript.src.split('?')[0];
+            basePath = new URL('.', scriptUrl).pathname;
+        } catch (e) {
+            console.warn('[JellyTTV] Could not resolve script base path, using default', e);
+        }
+    }
+
     var JellyTTV = {
         config: null,
         liveChannels: [],
@@ -52,7 +70,7 @@
 
         fetchConfig: function () {
             var self = this;
-            return fetch('/JellyTTV/Live', { headers: { 'Accept': 'application/json' } })
+            return fetch(basePath + 'Live', { headers: { 'Accept': 'application/json' } })
                 .then(function (res) { return res.ok ? res.json() : null; })
                 .then(function (data) {
                     // Config is derived from what the plugin returns alongside live data.
@@ -74,7 +92,7 @@
 
         refreshData: function () {
             var self = this;
-            return fetch('/JellyTTV/Live', { headers: { 'Accept': 'application/json' } })
+            return fetch(basePath + 'Live', { headers: { 'Accept': 'application/json' } })
                 .then(function (res) {
                     if (!res.ok) return null;
                     return res.json();

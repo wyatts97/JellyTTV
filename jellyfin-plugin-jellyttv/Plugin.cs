@@ -26,10 +26,12 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public Plugin(
         IApplicationPaths applicationPaths,
         IXmlSerializer xmlSerializer,
-        ILogger<Plugin> logger)
+        ILogger<Plugin> logger,
+        JellyTTVScriptManager scriptManager)
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
+        _ = scriptManager;
     }
 
     /// <inheritdoc />

@@ -27,7 +27,74 @@ public class JellyTTVScriptManager
     public JellyTTVScriptManager(ILogger<JellyTTVScriptManager> logger)
     {
         _logger = logger;
-        TryExternalRegistration();
+
+        // Try immediately in case JS Injector is already loaded.
+        if (TryExternalRegistration())
+        {
+            return;
+        }
+
+        // Otherwise retry in the background; JS Injector may not be ready at startup.
+        _ = RetryExternalRegistrationAsync();
+    }
+
+    private async Task RetryExternalRegistrationAsync()
+    {
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            _logger.LogDebug("JellyTTV external registration attempt {Attempt}", attempt);
+            await Task.Delay(TimeSpan.FromSeconds(2 * attempt)).ConfigureAwait(false);
+
+            try
+            {
+                if (TryExternalRegistration())
+                {
+                    _logger.LogInformation("JellyTTV external registration succeeded on attempt {Attempt}", attempt);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "JellyTTV external registration attempt {Attempt} failed", attempt);
+            }
+        }
+
+        _logger.LogWarning("JellyTTV could not register with an external injection plugin; relying on built-in middleware");
+    }
+
+    private bool TryExternalRegistration()
+    {
+        try
+        {
+            if (TryRegisterWithJavaScriptInjector())
+            {
+                _logger.LogInformation("JellyTTV registered with JavaScript Injector plugin");
+                IsExternal = true;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "JavaScript Injector registration failed");
+        }
+
+        try
+        {
+            if (TryRegisterWithFileTransformation())
+            {
+                _logger.LogInformation("JellyTTV registered with File Transformation plugin");
+                IsExternal = true;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "File Transformation registration failed");
+        }
+
+        _logger.LogInformation("No external injection plugin found; using built-in middleware");
+        IsExternal = false;
+        return false;
     }
 
     /// <summary>
@@ -58,40 +125,6 @@ public class JellyTTVScriptManager
 <script type=""text/javascript"" src=""/JellyTTV/twitch.js?v={Version}""></script>
 <!-- JellyTTV Plugin END -->
 ";
-    }
-
-    private void TryExternalRegistration()
-    {
-        try
-        {
-            if (TryRegisterWithJavaScriptInjector())
-            {
-                _logger.LogInformation("JellyTTV registered with JavaScript Injector plugin");
-                IsExternal = true;
-                return;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "JavaScript Injector registration failed");
-        }
-
-        try
-        {
-            if (TryRegisterWithFileTransformation())
-            {
-                _logger.LogInformation("JellyTTV registered with File Transformation plugin");
-                IsExternal = true;
-                return;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "File Transformation registration failed");
-        }
-
-        _logger.LogInformation("No external injection plugin found; using built-in middleware");
-        IsExternal = false;
     }
 
     private bool TryRegisterWithJavaScriptInjector()
