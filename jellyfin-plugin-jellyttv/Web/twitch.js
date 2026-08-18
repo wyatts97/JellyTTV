@@ -29,6 +29,7 @@
         config: null,
         liveChannels: [],
         knownLiveLogins: {},
+        lastError: null,
         pollTimer: null,
         navInjected: false,
         homeInjected: false,
@@ -96,11 +97,14 @@
             var self = this;
             return fetch(basePath + 'Live', { headers: { 'Accept': 'application/json' } })
                 .then(function (res) {
-                    if (!res.ok) return null;
+                    if (!res.ok) {
+                        throw new Error('Live endpoint returned ' + res.status);
+                    }
                     return res.json();
                 })
                 .then(function (data) {
                     if (!data || !data.channels) return;
+                    self.lastError = null;
                     self.liveChannels = data.channels.filter(function (c) { return c.is_live; });
 
                     // Check for newly live streamers (for notifications)
@@ -108,8 +112,9 @@
                         self.checkNewLive();
                     }
                 })
-                .catch(function () {
-                    // silent fail — will retry on next poll
+                .catch(function (err) {
+                    self.lastError = err && err.message ? err.message : 'Failed to fetch live data';
+                    console.warn('[JellyTTV] Live data fetch failed:', err);
                 });
         },
 
@@ -222,6 +227,17 @@
             tryInject();
         },
 
+        ensureHomeSectionFirst: function () {
+            var section = document.querySelector('.jellyttv-home-section');
+            var homeContainer = document.querySelector('.homeSectionsContainer') ||
+                                document.querySelector('[data-role="content"] .content-primary') ||
+                                document.querySelector('.homePage');
+
+            if (section && homeContainer && homeContainer.firstChild !== section) {
+                homeContainer.insertBefore(section, homeContainer.firstChild);
+            }
+        },
+
         updateNavBadge: function () {
             var badge = document.querySelector('.jellyttv-nav-badge');
             if (!badge) return;
@@ -273,6 +289,7 @@
                 // Insert at the top of the home page
                 homeContainer.insertBefore(section, homeContainer.firstChild);
                 self.homeInjected = true;
+                self.ensureHomeSectionFirst();
                 self.renderHomeCards();
             }
 
@@ -286,7 +303,7 @@
             row.innerHTML = '';
 
             if (this.liveChannels.length === 0) {
-                row.innerHTML = '<div class="jellyttv-empty">No streamers are currently live.</div>';
+                row.innerHTML = '<div class="jellyttv-empty">' + (this.lastError ? 'Error: ' + this.lastError : 'No streamers are currently live.') + '</div>';
                 return;
             }
 
@@ -480,6 +497,10 @@
                 if (self.config && self.config.EnableHomeSection && self.isOnHomePage() && !document.querySelector('.jellyttv-home-section')) {
                     self.homeInjected = false;
                     self.injectHomeSection();
+                }
+                // Other plugins (MediaBar) may insert before us; keep us at the top
+                if (self.config && self.config.EnableHomeSection) {
+                    self.ensureHomeSectionFirst();
                 }
             });
 

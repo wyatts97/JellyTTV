@@ -114,7 +114,8 @@
 
                     ApiClient.ajax({
                         type: 'GET',
-                        url: ApiClient.getUrl('JellyTTV/TestConnection', { url: url })
+                        url: ApiClient.getUrl('JellyTTV/TestConnection', { url: url }),
+                        dataType: 'json'
                     }).then(function (data) {
                         if (data && data.success) {
                             resultEl.textContent = '✓ Connected successfully to JellyTTV';
