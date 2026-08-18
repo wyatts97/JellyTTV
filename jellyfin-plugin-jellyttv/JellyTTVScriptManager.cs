@@ -143,8 +143,8 @@ public sealed class JellyTTVScriptManager : IDisposable
     {
         return $@"
 <!-- JellyTTV Plugin BEGIN -->
-<link rel=""stylesheet"" href=""JellyTTV/twitch.css?v={Version}"" />
-<script type=""text/javascript"" src=""JellyTTV/twitch.js?v={Version}""></script>
+<link rel=""stylesheet"" href=""/JellyTTV/twitch.css?v={Version}"" />
+<script type=""text/javascript"" src=""/JellyTTV/twitch.js?v={Version}""></script>
 <!-- JellyTTV Plugin END -->
 ";
     }
@@ -174,12 +174,12 @@ public sealed class JellyTTVScriptManager : IDisposable
 (function() {{
     var style = document.createElement('link');
     style.rel = 'stylesheet';
-    style.href = 'JellyTTV/twitch.css?v={Version}';
+    style.href = '/JellyTTV/twitch.css?v={Version}';
     document.head.appendChild(style);
 
     var s = document.createElement('script');
     s.type = 'text/javascript';
-    s.src = 'JellyTTV/twitch.js?v={Version}';
+    s.src = '/JellyTTV/twitch.js?v={Version}';
     document.head.appendChild(s);
 }})();";
 
