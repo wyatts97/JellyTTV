@@ -31,13 +31,16 @@ public sealed class PluginPagesIntegration : IDisposable
     {
         for (var attempt = 1; attempt <= 5; attempt++)
         {
-            try
+            if (attempt > 1)
             {
-                await Task.Delay(TimeSpan.FromSeconds(2 * attempt), cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt), cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
             }
 
             try
