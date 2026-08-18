@@ -1,7 +1,7 @@
 using System;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
@@ -69,43 +69,92 @@ public sealed class PluginPagesIntegration : IDisposable
         }
 
         var json = File.ReadAllText(configPath);
-        using var doc = JsonDocument.Parse(json);
 
-        // Check if our page is already registered
-        if (doc.RootElement.TryGetProperty("pages", out var existingPages))
+        JsonNode? root;
+        try
         {
-            foreach (var page in existingPages.EnumerateArray())
+            root = string.IsNullOrWhiteSpace(json) ? new JsonObject() : JsonNode.Parse(json);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse Plugin Pages config.json");
+            return false;
+        }
+
+        if (root is not JsonObject rootObj)
+        {
+            _logger.LogWarning("Plugin Pages config.json root is not a JSON object");
+            return false;
+        }
+
+        // Get or create pages array
+        var pagesArray = rootObj["pages"] as JsonArray;
+        if (pagesArray is null)
+        {
+            if (rootObj["pages"] is not null)
             {
-                if (page.TryGetProperty("Id", out var id) &&
-                    string.Equals(id.GetString(), PageId, StringComparison.OrdinalIgnoreCase))
+                _logger.LogWarning("Plugin Pages config.json 'pages' is not an array");
+                return false;
+            }
+            pagesArray = new JsonArray();
+            rootObj["pages"] = pagesArray;
+        }
+
+        // Check if our page is already registered; repair any corrupted string entries
+        var found = false;
+        for (var i = 0; i < pagesArray.Count; i++)
+        {
+            var item = pagesArray[i];
+
+            // Repair corrupted string entries from v0.3.0 bug
+            if (item is JsonValue val && val.TryGetValue<string>(out var str))
+            {
+                try
                 {
-                    _logger.LogDebug("JellyTTV page already registered in Plugin Pages config");
-                    return true;
+                    var parsed = JsonNode.Parse(str);
+                    if (parsed is JsonObject parsedObj)
+                    {
+                        pagesArray[i] = parsedObj;
+                        item = parsedObj;
+                        _logger.LogInformation("Repaired corrupted Plugin Pages config entry at index {Index}", i);
+                    }
                 }
+                catch
+                {
+                    continue;
+                }
+            }
+
+            if (item is JsonObject obj &&
+                obj["Id"]?.GetValue<string>() is string id &&
+                string.Equals(id, PageId, StringComparison.OrdinalIgnoreCase))
+            {
+                found = true;
             }
         }
 
-        // Add our page to the existing config
-        var pagesArray = doc.RootElement.TryGetProperty("pages", out var pages)
-            ? pages.EnumerateArray().Select(p => p.GetRawText()).ToList()
-            : new System.Collections.Generic.List<string>();
-
-        var ourPage = new
+        if (found)
         {
-            Id = PageId,
-            DisplayText = "Twitch",
-            Url = "/JellyTTV/Page",
-            Icon = "live_tv"
+            // Still write back to persist any repairs
+            File.WriteAllText(configPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            _logger.LogDebug("JellyTTV page already registered in Plugin Pages config");
+            return true;
+        }
+
+        // Add our page as a proper JSON object (not a stringified string)
+        var ourPage = new JsonObject
+        {
+            ["Id"] = PageId,
+            ["DisplayText"] = "Twitch",
+            ["Url"] = "/JellyTTV/Page",
+            ["Icon"] = "live_tv"
         };
 
-        pagesArray.Add(JsonSerializer.Serialize(ourPage));
-
-        var newConfig = new { pages = pagesArray };
-        var newJson = JsonSerializer.Serialize(newConfig, new JsonSerializerOptions { WriteIndented = true });
+        pagesArray.Add(ourPage);
 
         try
         {
-            File.WriteAllText(configPath, newJson);
+            File.WriteAllText(configPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             _logger.LogInformation("JellyTTV page added to Plugin Pages config.json");
             return true;
         }

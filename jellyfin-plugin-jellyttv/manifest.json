@@ -9,7 +9,7 @@
         "imagePath": "icon-512.png",
         "versions": [
             {
-                "checksum": "BDC3B676E874993A667D54323C02587F",
+                "checksum": "8474E2998573ACD2FA75E37C390A24B1",
                 "changelog": "v0.3.0 — Breaking architecture change: replaced DOM injection with native Home Screen Sections and Plugin Pages integration. Requires HSS and Plugin Pages plugins. Removed API key, sidebar link, and notifications settings. Fixed JSON snake_case deserialization, live thumbnail placeholder bug, and Test Connection staged error reporting. Added avatar fallback for thumbnails and cache-busting for live preview images.",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.3.0/jellyttv-v0.3.0.zip",
