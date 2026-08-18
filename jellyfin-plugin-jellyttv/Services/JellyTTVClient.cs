@@ -1,6 +1,7 @@
 using System;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.JellyTTV.Configuration;
 using Microsoft.Extensions.Logging;
@@ -16,9 +17,10 @@ public class JellyTTVClient
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<JellyTTVClient> _logger;
 
+    // Property names are pinned with [JsonPropertyName] on the models, so no
+    // naming policy is needed. Case-insensitive matching is kept as a safety net.
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         PropertyNameCaseInsensitive = true
     };
 
@@ -159,10 +161,18 @@ public class JellyTTVClient
 }
 
 /// <summary>
-/// Response model matching JellyTTV's /api/system endpoint.
+/// Response model matching JellyTTV's /api/live endpoint.
 /// </summary>
+/// <remarks>
+/// Every property is pinned with <see cref="JsonPropertyNameAttribute"/>. This matters in
+/// both directions: the JellyTTV backend emits snake_case, and Jellyfin serialises plugin
+/// controller responses with a PascalCase policy. Without these attributes the payload we
+/// hand to the web client would be renamed and every field would read as undefined there.
+/// </remarks>
 public class LiveChannelData
 {
+    /// <summary>Gets or sets the list of currently live channels.</summary>
+    [JsonPropertyName("channels")]
     public System.Collections.Generic.List<LiveChannelInfo>? Channels { get; set; }
 }
 
@@ -171,14 +181,43 @@ public class LiveChannelData
 /// </summary>
 public class LiveChannelInfo
 {
+    /// <summary>Gets or sets the JellyTTV channel id.</summary>
+    [JsonPropertyName("id")]
     public int Id { get; set; }
+
+    /// <summary>Gets or sets the Twitch login (url slug).</summary>
+    [JsonPropertyName("login")]
     public string Login { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the Twitch display name.</summary>
+    [JsonPropertyName("display_name")]
     public string DisplayName { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets a value indicating whether the channel is live.</summary>
+    [JsonPropertyName("is_live")]
     public bool IsLive { get; set; }
+
+    /// <summary>Gets or sets the stream title.</summary>
+    [JsonPropertyName("title")]
     public string? Title { get; set; }
+
+    /// <summary>Gets or sets the Twitch category / game name.</summary>
+    [JsonPropertyName("game_name")]
     public string? GameName { get; set; }
+
+    /// <summary>Gets or sets the current viewer count.</summary>
+    [JsonPropertyName("viewer_count")]
     public int ViewerCount { get; set; }
+
+    /// <summary>Gets or sets the live preview url, proxied through this plugin.</summary>
+    [JsonPropertyName("thumbnail_url")]
     public string? ThumbnailUrl { get; set; }
+
+    /// <summary>Gets or sets the streamer avatar url, proxied through this plugin.</summary>
+    [JsonPropertyName("avatar_url")]
     public string? AvatarUrl { get; set; }
+
+    /// <summary>Gets or sets the ISO-8601 timestamp the stream started at.</summary>
+    [JsonPropertyName("started_at")]
     public string? StartedAt { get; set; }
 }

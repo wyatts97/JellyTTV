@@ -1,84 +1,68 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.JellyTTV.Services;
-using MediaBrowser.Controller;
+using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.JellyTTV;
 
 /// <summary>
-/// Background service that polls the JellyTTV backend for live channel changes
-/// and triggers Jellyfin's "Refresh Guide" scheduled task when the set of live
-/// channels changes, so Live TV guide data stays current without manual refresh.
+/// Background service that polls the JellyTTV backend for live channel changes and
+/// triggers Jellyfin's "Refresh Guide" scheduled task whenever the set of live channels
+/// changes, so Live TV reflects go-live/go-offline events without a manual guide refresh.
 /// </summary>
+/// <remarks>
+/// The task is executed in-process through <see cref="ITaskManager"/> rather than by POSTing
+/// to <c>/ScheduledTasks/Running/RefreshGuide</c>. That endpoint requires an admin token, so
+/// the HTTP approach returned 401; going through the task manager needs no credentials and is
+/// unaffected by bind address, HTTPS or a reverse proxy.
+/// </remarks>
 public sealed class LiveTvGuideRefresher : IDisposable
 {
+    private const string RefreshGuideTaskKey = "RefreshGuide";
+
     private readonly JellyTTVClient _client;
-    private readonly IServerApplicationHost _appHost;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ITaskManager _taskManager;
     private readonly ILogger<LiveTvGuideRefresher> _logger;
     private readonly CancellationTokenSource _cts = new();
-    private HashSet<int> _lastLiveIds = new();
+    private HashSet<int>? _lastLiveIds;
+    private bool _warnedTaskMissing;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LiveTvGuideRefresher"/> class.
+    /// </summary>
     public LiveTvGuideRefresher(
         JellyTTVClient client,
-        IServerApplicationHost appHost,
-        IHttpClientFactory httpClientFactory,
+        ITaskManager taskManager,
         ILogger<LiveTvGuideRefresher> logger)
     {
         _client = client;
-        _appHost = appHost;
-        _httpClientFactory = httpClientFactory;
+        _taskManager = taskManager;
         _logger = logger;
         _ = PollLoop(_cts.Token);
     }
 
     private async Task PollLoop(CancellationToken cancellationToken)
     {
-        // Wait a bit for server startup to settle
-        await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Let server startup settle before the first backend call.
+            await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
 
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                var data = await _client.GetLiveChannelsAsync().ConfigureAwait(false);
-                if (data?.Channels != null)
-                {
-                    var currentLiveIds = data.Channels
-                        .Where(c => c.IsLive)
-                        .Select(c => c.Id)
-                        .ToHashSet();
-
-                    if (!_lastLiveIds.SetEquals(currentLiveIds))
-                    {
-                        var added = currentLiveIds.Except(_lastLiveIds).ToList();
-                        var removed = _lastLiveIds.Except(currentLiveIds).ToList();
-
-                        if (added.Count > 0)
-                        {
-                            _logger.LogInformation("Live channels changed: {Added} went live, {Removed} went offline — triggering Jellyfin guide refresh",
-                                string.Join(",", added), string.Join(",", removed));
-                        }
-                        else if (removed.Count > 0 && _lastLiveIds.Count > 0)
-                        {
-                            _logger.LogInformation("Live channels changed: {Removed} went offline — triggering Jellyfin guide refresh",
-                                string.Join(",", removed));
-                        }
-
-                        _lastLiveIds = currentLiveIds;
-                        await TriggerGuideRefresh().ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        _logger.LogDebug("No live channel changes detected");
-                    }
-                }
+                await PollOnce().ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -89,8 +73,7 @@ public sealed class LiveTvGuideRefresher : IDisposable
                 _logger.LogDebug(ex, "Error during guide refresher poll");
             }
 
-            var config = Plugin.Instance?.Configuration;
-            var interval = Math.Max(30, config?.RefreshIntervalSeconds ?? 60);
+            var interval = Math.Max(30, Plugin.Instance?.Configuration.RefreshIntervalSeconds ?? 60);
 
             try
             {
@@ -103,36 +86,83 @@ public sealed class LiveTvGuideRefresher : IDisposable
         }
     }
 
-    private async Task TriggerGuideRefresh()
+    private async Task PollOnce()
     {
+        var data = await _client.GetLiveChannelsAsync().ConfigureAwait(false);
+        if (data?.Channels == null)
+        {
+            return;
+        }
+
+        var currentLiveIds = data.Channels
+            .Where(c => c.IsLive)
+            .Select(c => c.Id)
+            .ToHashSet();
+
+        // First successful poll only establishes a baseline. Refreshing here would fire a
+        // redundant guide rebuild on every server restart.
+        if (_lastLiveIds == null)
+        {
+            _lastLiveIds = currentLiveIds;
+            _logger.LogDebug("Guide refresher baseline: {Count} channel(s) live", currentLiveIds.Count);
+            return;
+        }
+
+        if (_lastLiveIds.SetEquals(currentLiveIds))
+        {
+            return;
+        }
+
+        var wentLive = currentLiveIds.Except(_lastLiveIds).ToList();
+        var wentOffline = _lastLiveIds.Except(currentLiveIds).ToList();
+        _lastLiveIds = currentLiveIds;
+
+        _logger.LogInformation(
+            "Live channels changed ({LiveCount} now live: +[{WentLive}] -[{WentOffline}]) — refreshing the Jellyfin guide",
+            currentLiveIds.Count,
+            string.Join(",", wentLive),
+            string.Join(",", wentOffline));
+
+        TriggerGuideRefresh();
+    }
+
+    private void TriggerGuideRefresh()
+    {
+        var worker = _taskManager.ScheduledTasks
+            .FirstOrDefault(t => string.Equals(t.ScheduledTask.Key, RefreshGuideTaskKey, StringComparison.OrdinalIgnoreCase));
+
+        if (worker == null)
+        {
+            if (!_warnedTaskMissing)
+            {
+                _warnedTaskMissing = true;
+                _logger.LogWarning(
+                    "Jellyfin's '{Key}' scheduled task was not found, so the Live TV guide cannot be " +
+                    "refreshed automatically. This is expected if Live TV is not configured.",
+                    RefreshGuideTaskKey);
+            }
+
+            return;
+        }
+
+        if (worker.State == TaskState.Running)
+        {
+            _logger.LogDebug("Guide refresh already running; skipping");
+            return;
+        }
+
         try
         {
-            // Get the server's own URL
-            var serverUrl = _appHost.ListenWithHttps
-                ? $"https://localhost:{_appHost.HttpsPort}"
-                : $"http://localhost:{_appHost.HttpPort}";
-
-            var client = _httpClientFactory.CreateClient("JellyTTV");
-            client.Timeout = TimeSpan.FromSeconds(10);
-
-            // Trigger the "Refresh Guide" scheduled task via Jellyfin's internal API
-            var response = await client.PostAsync($"{serverUrl}/ScheduledTasks/Running/RefreshGuide", null).ConfigureAwait(false);
-
-            if (response.IsSuccessStatusCode)
-            {
-                _logger.LogInformation("Jellyfin guide refresh triggered successfully");
-            }
-            else
-            {
-                _logger.LogWarning("Guide refresh returned HTTP {Status}", (int)response.StatusCode);
-            }
+            _taskManager.Execute(worker, new TaskOptions());
+            _logger.LogInformation("Triggered Jellyfin '{Key}' task", RefreshGuideTaskKey);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to trigger Jellyfin guide refresh");
+            _logger.LogWarning(ex, "Failed to trigger the Jellyfin guide refresh");
         }
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (_disposed)

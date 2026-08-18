@@ -76,39 +76,103 @@
         (function () {
             var grid = document.getElementById('twitchLiveGrid');
 
+            // Read a field regardless of the casing convention the server used.
+            // Jellyfin serialises plugin responses with a PascalCase policy, while the
+            // JellyTTV backend emits snake_case, so accept every plausible spelling
+            // rather than silently rendering an empty page.
+            function field(obj, snake) {
+                if (!obj) return undefined;
+                if (obj[snake] !== undefined) return obj[snake];
+                var camel = snake.replace(/_([a-z])/g, function (_, ch) { return ch.toUpperCase(); });
+                if (obj[camel] !== undefined) return obj[camel];
+                var pascal = camel.charAt(0).toUpperCase() + camel.slice(1);
+                return obj[pascal];
+            }
+
+            function setEmpty(message) {
+                grid.textContent = '';
+                var div = document.createElement('div');
+                div.className = 'twitch-empty';
+                div.textContent = message;
+                grid.appendChild(div);
+            }
+
+            function buildCard(c) {
+                var login = field(c, 'login') || '';
+                var name = field(c, 'display_name') || login;
+                var thumb = field(c, 'thumbnail_url') || field(c, 'avatar_url') || '';
+                var avatar = field(c, 'avatar_url') || '';
+
+                var card = document.createElement('div');
+                card.className = 'twitch-live-card';
+                card.addEventListener('click', function () {
+                    window.open('https://twitch.tv/' + login, '_blank', 'noopener');
+                });
+
+                var img = document.createElement('img');
+                img.className = 'thumb';
+                img.alt = name;
+                img.loading = 'lazy';
+                if (thumb) {
+                    img.src = thumb;
+                }
+                if (avatar && avatar !== thumb) {
+                    img.addEventListener('error', function () {
+                        img.onerror = null;
+                        img.src = avatar;
+                    });
+                }
+                card.appendChild(img);
+
+                var info = document.createElement('div');
+                info.className = 'info';
+                // textContent keeps stream titles safe without hand-rolled escaping.
+                info.appendChild(el('div', 'streamer', name));
+                info.appendChild(el('div', 'title', field(c, 'title') || ''));
+                info.appendChild(el('div', 'game', field(c, 'game_name') || ''));
+                card.appendChild(info);
+
+                return card;
+            }
+
+            function el(tag, className, text) {
+                var node = document.createElement(tag);
+                node.className = className;
+                node.textContent = text;
+                return node;
+            }
+
             function loadLive() {
                 fetch('/JellyTTV/Live', { headers: { 'Accept': 'application/json' } })
                     .then(function (res) {
-                        if (!res.ok) throw new Error('Live endpoint returned ' + res.status);
-                        return res.json();
+                        return res.text().then(function (body) {
+                            if (!res.ok) {
+                                var detail = '';
+                                try {
+                                    detail = (JSON.parse(body) || {}).error || '';
+                                } catch (e) { /* not json */ }
+                                throw new Error(detail || ('Live endpoint returned HTTP ' + res.status));
+                            }
+                            return JSON.parse(body);
+                        });
                     })
                     .then(function (data) {
-                        if (!data || !data.channels || data.channels.length === 0) {
-                            grid.innerHTML = '<div class="twitch-empty">No streamers are currently live.</div>';
+                        var channels = field(data, 'channels');
+                        if (!Array.isArray(channels)) {
+                            throw new Error('Unexpected response shape from /JellyTTV/Live');
+                        }
+                        if (channels.length === 0) {
+                            setEmpty('No streamers are currently live.');
                             return;
                         }
 
-                        grid.innerHTML = data.channels.map(function (c) {
-                            var thumb = c.thumbnail_url || c.avatar_url || '';
-                            var avatar = c.avatar_url || '';
-                            var title = (c.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                            var game = (c.game_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                            var name = (c.display_name || c.login || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                            var streamUrl = 'https://twitch.tv/' + (c.login || '');
-
-                            return '<div class="twitch-live-card" onclick="window.open(\'' + streamUrl + '\', \'_blank\')">' +
-                                '<img class="thumb" src="' + thumb + '" alt="' + name + '" ' +
-                                'onerror="this.onerror=null;this.src=\'' + avatar + '\'" />' +
-                                '<div class="info">' +
-                                '<div class="streamer">' + name + '</div>' +
-                                '<div class="title">' + title + '</div>' +
-                                '<div class="game">' + game + '</div>' +
-                                '</div></div>';
-                        }).join('');
+                        var frag = document.createDocumentFragment();
+                        channels.forEach(function (c) { frag.appendChild(buildCard(c)); });
+                        grid.textContent = '';
+                        grid.appendChild(frag);
                     })
                     .catch(function (err) {
-                        grid.innerHTML = '<div class="twitch-empty">Failed to load live streams: ' +
-                            (err.message || 'unknown error') + '</div>';
+                        setEmpty('Failed to load live streams: ' + (err.message || 'unknown error'));
                     });
             }
 

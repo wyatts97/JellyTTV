@@ -9,6 +9,14 @@
         "imagePath": "icon-512.png",
         "versions": [
             {
+                "checksum": "307E0A3F7EC5B65A693DB7B6955D75BB",
+                "changelog": "v0.3.1 — Fixes the Twitch page showing \"no one is live\": Jellyfin serialises plugin responses in PascalCase, so the page's snake_case field reads were all undefined. Property names are now pinned with [JsonPropertyName] and the page tolerates any casing. The 'Live on Twitch' home section now returns real Live TV channel items, restoring artwork and in-app playback and fixing the homepage occasionally collapsing to the default layout with broken scrolling. Automatic guide refresh now runs Jellyfin's Refresh Guide task in-process via ITaskManager instead of an unauthenticated HTTP call that returned 401 — no Jellyfin API key is required.",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.3.1/jellyttv-v0.3.1.zip",
+                "timestamp": "2026-08-18T00:00:00Z",
+                "version": "0.3.1.0"
+            },
+            {
                 "checksum": "CBD940B064C22F5FF8C26EF2FEEF7E49",
                 "changelog": "v0.3.0 — Breaking architecture change: replaced DOM injection with native Home Screen Sections and Plugin Pages integration. Requires HSS and Plugin Pages plugins. Removed API key, sidebar link, and notifications settings. Fixed JSON snake_case deserialization, live thumbnail placeholder bug, and Test Connection staged error reporting. Added avatar fallback for thumbnails and cache-busting for live preview images.",
                 "targetAbi": "10.11.0.0",

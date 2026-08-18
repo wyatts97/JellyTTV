@@ -74,10 +74,24 @@
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher">
             <summary>
-            Background service that polls the JellyTTV backend for live channel changes
-            and triggers Jellyfin's "Refresh Guide" scheduled task when the set of live
-            channels changes, so Live TV guide data stays current without manual refresh.
+            Background service that polls the JellyTTV backend for live channel changes and
+            triggers Jellyfin's "Refresh Guide" scheduled task whenever the set of live channels
+            changes, so Live TV reflects go-live/go-offline events without a manual guide refresh.
             </summary>
+            <remarks>
+            The task is executed in-process through <see cref="T:MediaBrowser.Model.Tasks.ITaskManager"/> rather than by POSTing
+            to <c>/ScheduledTasks/Running/RefreshGuide</c>. That endpoint requires an admin token, so
+            the HTTP approach returned 401; going through the task manager needs no credentials and is
+            unaffected by bind address, HTTPS or a reverse proxy.
+            </remarks>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher.#ctor(Jellyfin.Plugin.JellyTTV.Services.JellyTTVClient,MediaBrowser.Model.Tasks.ITaskManager,Microsoft.Extensions.Logging.ILogger{Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher})">
+            <summary>
+            Initializes a new instance of the <see cref="T:Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher"/> class.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher.Dispose">
+            <inheritdoc />
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.Plugin">
             <summary>
@@ -145,26 +159,82 @@
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.Services.LiveChannelData">
             <summary>
-            Response model matching JellyTTV's /api/system endpoint.
+            Response model matching JellyTTV's /api/live endpoint.
             </summary>
+            <remarks>
+            Every property is pinned with <see cref="T:System.Text.Json.Serialization.JsonPropertyNameAttribute"/>. This matters in
+            both directions: the JellyTTV backend emits snake_case, and Jellyfin serialises plugin
+            controller responses with a PascalCase policy. Without these attributes the payload we
+            hand to the web client would be renamed and every field would read as undefined there.
+            </remarks>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelData.Channels">
+            <summary>Gets or sets the list of currently live channels.</summary>
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo">
             <summary>
             Individual live channel info as returned by JellyTTV.
             </summary>
         </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.Id">
+            <summary>Gets or sets the JellyTTV channel id.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.Login">
+            <summary>Gets or sets the Twitch login (url slug).</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.DisplayName">
+            <summary>Gets or sets the Twitch display name.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.IsLive">
+            <summary>Gets or sets a value indicating whether the channel is live.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.Title">
+            <summary>Gets or sets the stream title.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.GameName">
+            <summary>Gets or sets the Twitch category / game name.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.ViewerCount">
+            <summary>Gets or sets the current viewer count.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.ThumbnailUrl">
+            <summary>Gets or sets the live preview url, proxied through this plugin.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.AvatarUrl">
+            <summary>Gets or sets the streamer avatar url, proxied through this plugin.</summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo.StartedAt">
+            <summary>Gets or sets the ISO-8601 timestamp the stream started at.</summary>
+        </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler">
             <summary>
             Results handler invoked by the Home Screen Sections plugin to populate
             the "Live on Twitch" section. HSS creates instances via DI (ActivatorUtilities).
             </summary>
+            <remarks>
+            This deliberately returns <b>real</b> <c>LiveTvChannel</c> items from Jellyfin's library
+            rather than synthetic ones. Home Screen Sections offers no supported way for a third-party
+            plugin to attach an external image url to a card — <c>ImageTags</c> values must be real
+            image hashes, and HSS's own Jellyseerr sections only render remote posters because its
+            bundled client script special-cases them. Synthetic items also carry ids that resolve to
+            nothing, which makes the web client's card builder throw mid-render and collapses the whole
+            modular home layout. Using genuine library items gives us working artwork (sourced from the
+            playlist's <c>tvg-logo</c>), in-app playback and favourites for free.
+            </remarks>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler.#ctor(MediaBrowser.Controller.Library.ILibraryManager,MediaBrowser.Controller.Dto.IDtoService,MediaBrowser.Controller.Library.IUserManager,Jellyfin.Plugin.JellyTTV.Services.JellyTTVClient,Microsoft.Extensions.Logging.ILogger{Jellyfin.Plugin.JellyTTV.TwitchResultsHandler})">
+            <summary>
+            Initializes a new instance of the <see cref="T:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler"/> class.
+            </summary>
         </member>
         <member name="M:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler.GetResults(Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload)">
             <summary>
-            Returns live Twitch channels as a QueryResult of BaseItemDto for the HSS section.
-            Builds synthetic DTOs directly from backend data — does not depend on
-            LiveTvChannel items existing in Jellyfin's library.
+            Returns the Live TV channels of currently-live Twitch streamers.
             </summary>
+            <remarks>
+            Never throws. Home Screen Sections invokes this inline while building the home screen,
+            so an escaping exception would surface as an HTTP 500 and break the entire page.
+            </remarks>
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload">
             <summary>

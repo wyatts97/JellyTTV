@@ -137,7 +137,13 @@ function ChannelCard({
       <CardBody className="space-y-4">
         <div className="flex items-start gap-3">
           {channel.avatar_url ? (
-            <img src={channel.avatar_url} alt="" className="size-11 rounded-full" loading="lazy" />
+            /* Served via our own origin: static-cdn.jtvnw.net is on common ad-block lists. */
+            <img
+              src={`/api/channels/${channel.id}/avatar`}
+              alt=""
+              className="size-11 rounded-full"
+              loading="lazy"
+            />
           ) : (
             <div className="grid size-11 place-items-center rounded-full bg-ink-700 text-ink-300">
               <Tv className="size-5" aria-hidden />

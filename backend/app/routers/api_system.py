@@ -70,6 +70,8 @@ async def dashboard(
     settings = await get_settings(session)
     rows = await channel_service.list_channels(session)
     live = [c for c in rows if c.is_live and c.enabled and c.live_enabled]
+    # Same 90s bucket as /api/live so previews stay fresh without defeating caching.
+    cache_bust = int(utcnow().timestamp()) // 90
 
     active_jobs = list(
         (
@@ -101,8 +103,12 @@ async def dashboard(
                 "game": c.live_game,
                 "viewers": c.live_viewers,
                 "started_at": iso_z(c.live_started_at),
-                "thumbnail_url": c.live_thumbnail_url,
-                "avatar_url": c.avatar_url,
+                # Proxy through our own origin rather than handing the browser a
+                # static-cdn.jtvnw.net url: that host is on common ad-block lists and
+                # the preview 404s around live/offline transitions. The proxy also
+                # falls back to the avatar, so a card never renders broken.
+                "thumbnail_url": f"/api/channels/{c.id}/thumbnail?v={cache_bust}",
+                "avatar_url": f"/api/channels/{c.id}/avatar",
             }
             for c in live
         ],
