@@ -230,19 +230,11 @@ public sealed class JellyTTVScriptManager : IDisposable
         }
         else
         {
-            // JObject overload - use the target assembly's own JObject type to avoid mismatch.
-            var targetJsonAssembly = assembly.GetType("Newtonsoft.Json.Linq.JObject")?.Assembly;
-            if (targetJsonAssembly == null)
-            {
-                _logger.LogWarning("Could not find target assembly's JObject type");
-                return false;
-            }
-
-            var targetJObjectType = targetJsonAssembly.GetType("Newtonsoft.Json.Linq.JObject");
-            var parseMethod = targetJObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+            // JObject overload - find Newtonsoft.Json in the same AssemblyLoadContext as the target plugin.
+            var parseMethod = GetTargetJObjectParseMethod(assembly);
             if (parseMethod == null)
             {
-                _logger.LogWarning("Could not find JObject.Parse method on target assembly");
+                _logger.LogWarning("Could not find JObject.Parse in target plugin's AssemblyLoadContext");
                 return false;
             }
 
@@ -307,12 +299,11 @@ public sealed class JellyTTVScriptManager : IDisposable
             return false;
         }
 
-        // Use the target assembly's own JObject type to avoid cross-AssemblyLoadContext type mismatch.
-        var targetJObjectType = assembly.GetType("Newtonsoft.Json.Linq.JObject");
-        var parseMethod = targetJObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+        // Find Newtonsoft.Json in the same AssemblyLoadContext as the target plugin.
+        var parseMethod = GetTargetJObjectParseMethod(assembly);
         if (parseMethod == null)
         {
-            _logger.LogWarning("Could not find JObject.Parse on target assembly");
+            _logger.LogWarning("Could not find JObject.Parse in target plugin's AssemblyLoadContext");
             return false;
         }
 
@@ -337,6 +328,56 @@ public sealed class JellyTTVScriptManager : IDisposable
             _logger.LogDebug("File Transformation not ready yet: {Message}", ex.InnerException.Message);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Finds the JObject.Parse method from the Newtonsoft.Json assembly loaded in the
+    /// same AssemblyLoadContext as the target plugin, to avoid cross-context type mismatch.
+    /// </summary>
+    private MethodInfo? GetTargetJObjectParseMethod(Assembly targetAssembly)
+    {
+        // Get the AssemblyLoadContext of the target plugin.
+        var targetContext = AssemblyLoadContext.GetLoadContext(targetAssembly);
+
+        // Search all assemblies in that context for Newtonsoft.Json.
+        var assemblies = (targetContext != null
+            ? targetContext.Assemblies
+            : AssemblyLoadContext.All.SelectMany(x => x.Assemblies));
+
+        foreach (var asm in assemblies)
+        {
+            if (asm.GetName().Name != "Newtonsoft.Json")
+            {
+                continue;
+            }
+
+            var jObjectType = asm.GetType("Newtonsoft.Json.Linq.JObject");
+            var parseMethod = jObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+            if (parseMethod != null)
+            {
+                _logger.LogDebug("Found Newtonsoft.Json JObject.Parse in {Assembly}", asm.FullName);
+                return parseMethod;
+            }
+        }
+
+        // Fallback: search all contexts if not found in the target context.
+        foreach (var asm in AssemblyLoadContext.All.SelectMany(x => x.Assemblies))
+        {
+            if (asm.GetName().Name != "Newtonsoft.Json")
+            {
+                continue;
+            }
+
+            var jObjectType = asm.GetType("Newtonsoft.Json.Linq.JObject");
+            var parseMethod = jObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+            if (parseMethod != null)
+            {
+                _logger.LogDebug("Found Newtonsoft.Json JObject.Parse in fallback {Assembly}", asm.FullName);
+                return parseMethod;
+            }
+        }
+
+        return null;
     }
 }
 
