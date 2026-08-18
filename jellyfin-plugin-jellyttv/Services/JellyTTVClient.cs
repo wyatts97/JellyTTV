@@ -88,29 +88,20 @@ public class JellyTTVClient
                 }
             }
 
-            // Rewrite thumbnail and avatar URLs to go through our proxy controller
+            // Always rewrite thumbnail and avatar URLs to go through our proxy
+            // controller. The backend may return relative URLs (/api/channels/...)
+            // or absolute Twitch CDN URLs — both need to be proxied through Jellyfin
+            // to avoid CORS issues and broken images in the web client.
             var pluginBase = "/JellyTTV";
             if (data.Channels != null)
             {
                 foreach (var ch in data.Channels)
                 {
-                    if (!string.IsNullOrEmpty(ch.ThumbnailUrl))
-                    {
-                        // Keep relative proxy URLs from JellyTTV as-is, rewrite absolute Twitch URLs
-                        if (ch.ThumbnailUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                        {
-                            ch.ThumbnailUrl = $"{pluginBase}/Thumbnail/{ch.Id}";
-                        }
-                    }
-
-                    if (!string.IsNullOrEmpty(ch.AvatarUrl))
-                    {
-                        if (ch.AvatarUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                        {
-                            ch.AvatarUrl = $"{pluginBase}/Avatar/{ch.Id}";
-                        }
-                    }
+                    ch.ThumbnailUrl = $"{pluginBase}/Thumbnail/{ch.Id}";
+                    ch.AvatarUrl = $"{pluginBase}/Avatar/{ch.Id}";
                 }
+
+                _logger.LogInformation("JellyTTV live data: {Count} channels live", data.Channels.Count);
             }
 
             lock (_cacheLock)

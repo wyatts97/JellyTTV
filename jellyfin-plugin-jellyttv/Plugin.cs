@@ -17,6 +17,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
 {
     private readonly HomeScreenSectionsIntegration _hssIntegration;
     private readonly PluginPagesIntegration _pluginPagesIntegration;
+    private readonly LiveTvGuideRefresher _guideRefresher;
     private bool _disposed;
 
     /// <summary>
@@ -32,12 +33,14 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
         IXmlSerializer xmlSerializer,
         ILogger<Plugin> logger,
         HomeScreenSectionsIntegration hssIntegration,
-        PluginPagesIntegration pluginPagesIntegration)
+        PluginPagesIntegration pluginPagesIntegration,
+        LiveTvGuideRefresher guideRefresher)
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
         _hssIntegration = hssIntegration;
         _pluginPagesIntegration = pluginPagesIntegration;
+        _guideRefresher = guideRefresher;
     }
 
     /// <inheritdoc />
@@ -83,6 +86,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
         _disposed = true;
         _hssIntegration.Dispose();
         _pluginPagesIntegration.Dispose();
+        _guideRefresher.Dispose();
         Instance = null;
     }
 }

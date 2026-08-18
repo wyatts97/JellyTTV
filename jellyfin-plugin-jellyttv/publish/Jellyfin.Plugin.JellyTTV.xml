@@ -72,6 +72,13 @@
             via reflection (to avoid AssemblyLoadContext type mismatches).
             </summary>
         </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher">
+            <summary>
+            Background service that polls the JellyTTV backend for live channel changes
+            and triggers Jellyfin's "Refresh Guide" scheduled task when the set of live
+            channels changes, so Live TV guide data stays current without manual refresh.
+            </summary>
+        </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.Plugin">
             <summary>
             Main plugin class for JellyTTV integration.
@@ -84,7 +91,7 @@
             Gets the singleton plugin instance.
             </summary>
         </member>
-        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.#ctor(MediaBrowser.Common.Configuration.IApplicationPaths,MediaBrowser.Model.Serialization.IXmlSerializer,Microsoft.Extensions.Logging.ILogger{Jellyfin.Plugin.JellyTTV.Plugin},Jellyfin.Plugin.JellyTTV.HomeScreenSectionsIntegration,Jellyfin.Plugin.JellyTTV.PluginPagesIntegration)">
+        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.#ctor(MediaBrowser.Common.Configuration.IApplicationPaths,MediaBrowser.Model.Serialization.IXmlSerializer,Microsoft.Extensions.Logging.ILogger{Jellyfin.Plugin.JellyTTV.Plugin},Jellyfin.Plugin.JellyTTV.HomeScreenSectionsIntegration,Jellyfin.Plugin.JellyTTV.PluginPagesIntegration,Jellyfin.Plugin.JellyTTV.LiveTvGuideRefresher)">
             <summary>
             Initializes a new instance of the <see cref="T:Jellyfin.Plugin.JellyTTV.Plugin"/> class.
             </summary>
@@ -155,6 +162,8 @@
         <member name="M:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler.GetResults(Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload)">
             <summary>
             Returns live Twitch channels as a QueryResult of BaseItemDto for the HSS section.
+            Builds synthetic DTOs directly from backend data — does not depend on
+            LiveTvChannel items existing in Jellyfin's library.
             </summary>
         </member>
         <member name="T:Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload">

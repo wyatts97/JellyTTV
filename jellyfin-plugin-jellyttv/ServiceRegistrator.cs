@@ -17,5 +17,6 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<JellyTTVClient>();
         serviceCollection.AddSingleton<HomeScreenSectionsIntegration>();
         serviceCollection.AddSingleton<PluginPagesIntegration>();
+        serviceCollection.AddSingleton<LiveTvGuideRefresher>();
     }
 }

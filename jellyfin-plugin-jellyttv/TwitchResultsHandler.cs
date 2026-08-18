@@ -3,10 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Jellyfin.Data.Enums;
 using Jellyfin.Plugin.JellyTTV.Services;
-using MediaBrowser.Controller.Dto;
-using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
@@ -20,89 +17,40 @@ namespace Jellyfin.Plugin.JellyTTV;
 /// </summary>
 public class TwitchResultsHandler
 {
-    private readonly ILibraryManager _libraryManager;
-    private readonly IDtoService _dtoService;
-    private readonly IUserManager _userManager;
     private readonly JellyTTVClient _jellyTTVClient;
     private readonly ILogger<TwitchResultsHandler> _logger;
 
     public TwitchResultsHandler(
-        ILibraryManager libraryManager,
-        IDtoService dtoService,
         IUserManager userManager,
         JellyTTVClient jellyTTVClient,
         ILogger<TwitchResultsHandler> logger)
     {
-        _libraryManager = libraryManager;
-        _dtoService = dtoService;
-        _userManager = userManager;
         _jellyTTVClient = jellyTTVClient;
         _logger = logger;
     }
 
     /// <summary>
     /// Returns live Twitch channels as a QueryResult of BaseItemDto for the HSS section.
+    /// Builds synthetic DTOs directly from backend data — does not depend on
+    /// LiveTvChannel items existing in Jellyfin's library.
     /// </summary>
     public QueryResult<BaseItemDto> GetResults(HomeScreenSectionPayload payload)
     {
         try
         {
-            var user = _userManager.GetUserById(payload.UserId);
-            if (user == null)
-            {
-                return new QueryResult<BaseItemDto>();
-            }
-
-            // Get live channel display names from the JellyTTV backend
             var liveData = _jellyTTVClient.GetLiveChannelsAsync().GetAwaiter().GetResult();
             if (liveData?.Channels == null || liveData.Channels.Count == 0)
             {
+                _logger.LogDebug("No live channels from backend for HSS section");
                 return new QueryResult<BaseItemDto>();
             }
 
-            var liveNames = new HashSet<string>(
-                liveData.Channels.Select(c => c.DisplayName),
-                StringComparer.OrdinalIgnoreCase);
-
-            // Query all LiveTvChannel items from Jellyfin's library
-            var query = new InternalItemsQuery(user)
-            {
-                IncludeItemTypes = new[] { BaseItemKind.LiveTvChannel },
-                EnableTotalRecordCount = false
-            };
-
-            var channels = _libraryManager.GetItemList(query)
-                .OfType<LiveTvChannel>()
-                .Where(ch => liveNames.Contains(ch.Name))
+            var dtos = liveData.Channels
                 .Take(32)
-                .ToList();
-
-            if (channels.Count == 0)
-            {
-                return new QueryResult<BaseItemDto>();
-            }
-
-            var dtoOptions = new DtoOptions
-            {
-                EnableImages = true,
-                Fields = new List<ItemFields>
-                {
-                    ItemFields.PrimaryImageAspectRatio,
-                    ItemFields.Path
-                }
-            };
-            dtoOptions.ImageTypeLimit = 1;
-            dtoOptions.ImageTypes = new List<ImageType>
-            {
-                ImageType.Primary,
-                ImageType.Thumb,
-                ImageType.Backdrop
-            };
-
-            var dtos = channels
-                .Select(ch => _dtoService.GetBaseItemDto(ch, dtoOptions, user))
+                .Select(ch => BuildDto(ch))
                 .ToArray();
 
+            _logger.LogDebug("HSS returning {Count} live Twitch channels", dtos.Length);
             return new QueryResult<BaseItemDto>(dtos);
         }
         catch (Exception ex)
@@ -110,6 +58,44 @@ public class TwitchResultsHandler
             _logger.LogError(ex, "Failed to get Twitch results for HSS section");
             return new QueryResult<BaseItemDto>();
         }
+    }
+
+    private static BaseItemDto BuildDto(LiveChannelInfo ch)
+    {
+        var dto = new BaseItemDto
+        {
+            Id = Guid.NewGuid(),
+            Name = ch.DisplayName,
+            Overview = ch.Title,
+            Type = BaseItemKind.LiveTvChannel,
+            SortName = ch.DisplayName,
+            ForcedSortName = ch.DisplayName,
+            DateCreated = DateTime.UtcNow,
+            PremiereDate = ch.StartedAt != null
+                ? DateTimeOffset.TryParse(ch.StartedAt, out var started)
+                    ? started.UtcDateTime
+                    : (DateTime?)null
+                : null,
+            Genres = string.IsNullOrEmpty(ch.GameName)
+                ? Array.Empty<string>()
+                : new[] { ch.GameName },
+            Path = $"https://twitch.tv/{ch.Login}",
+            Taglines = new[] { $"LIVE • {ch.ViewerCount:N0} viewers" },
+            ImageTags = new Dictionary<ImageType, string>
+            {
+                { ImageType.Primary, ch.ThumbnailUrl ?? ch.AvatarUrl ?? string.Empty },
+                { ImageType.Thumb, ch.ThumbnailUrl ?? string.Empty },
+                { ImageType.Logo, ch.AvatarUrl ?? string.Empty }
+            },
+            BackdropImageTags = new[] { ch.ThumbnailUrl ?? string.Empty },
+            ParentBackdropImageTags = Array.Empty<string>(),
+            ProviderIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Twitch", ch.Login }
+            }
+        };
+
+        return dto;
     }
 }
 
