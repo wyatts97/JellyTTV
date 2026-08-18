@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Live on Twitch</title>
+    <style>
+        .twitch-page-container {
+            padding: 1em;
+        }
+        .twitch-page-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1em;
+        }
+        .twitch-page-header h2 {
+            margin: 0;
+            font-size: 1.5em;
+        }
+        .twitch-live-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1em;
+        }
+        .twitch-live-card {
+            background: var(--card-bg, rgba(0,0,0,0.3));
+            border-radius: 8px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .twitch-live-card:hover {
+            transform: scale(1.03);
+        }
+        .twitch-live-card .thumb {
+            width: 100%;
+            aspect-ratio: 16/9;
+            background: #333;
+            object-fit: cover;
+        }
+        .twitch-live-card .info {
+            padding: 0.5em 0.75em;
+        }
+        .twitch-live-card .streamer {
+            font-weight: 600;
+            font-size: 0.95em;
+        }
+        .twitch-live-card .title {
+            font-size: 0.85em;
+            opacity: 0.85;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .twitch-live-card .game {
+            font-size: 0.8em;
+            opacity: 0.65;
+            margin-top: 0.25em;
+        }
+        .twitch-empty {
+            text-align: center;
+            padding: 3em;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="twitch-page-container">
+        <div class="twitch-page-header">
+            <h2>Live on Twitch</h2>
+        </div>
+        <div id="twitchLiveGrid" class="twitch-live-grid">
+            <div class="twitch-empty">Loading live streams...</div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            var grid = document.getElementById('twitchLiveGrid');
+
+            function loadLive() {
+                fetch('/JellyTTV/Live', { headers: { 'Accept': 'application/json' } })
+                    .then(function (res) {
+                        if (!res.ok) throw new Error('Live endpoint returned ' + res.status);
+                        return res.json();
+                    })
+                    .then(function (data) {
+                        if (!data || !data.channels || data.channels.length === 0) {
+                            grid.innerHTML = '<div class="twitch-empty">No streamers are currently live.</div>';
+                            return;
+                        }
+
+                        grid.innerHTML = data.channels.map(function (c) {
+                            var thumb = c.thumbnail_url || c.avatar_url || '';
+                            var avatar = c.avatar_url || '';
+                            var title = (c.title || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            var game = (c.game_name || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            var name = (c.display_name || c.login || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                            var streamUrl = 'https://twitch.tv/' + (c.login || '');
+
+                            return '<div class="twitch-live-card" onclick="window.open(\'' + streamUrl + '\', \'_blank\')">' +
+                                '<img class="thumb" src="' + thumb + '" alt="' + name + '" ' +
+                                'onerror="this.onerror=null;this.src=\'' + avatar + '\'" />' +
+                                '<div class="info">' +
+                                '<div class="streamer">' + name + '</div>' +
+                                '<div class="title">' + title + '</div>' +
+                                '<div class="game">' + game + '</div>' +
+                                '</div></div>';
+                        }).join('');
+                    })
+                    .catch(function (err) {
+                        grid.innerHTML = '<div class="twitch-empty">Failed to load live streams: ' +
+                            (err.message || 'unknown error') + '</div>';
+                    });
+            }
+
+            loadLive();
+            setInterval(loadLive, 60000);
+        })();
+    </script>
+</body>
+</html>

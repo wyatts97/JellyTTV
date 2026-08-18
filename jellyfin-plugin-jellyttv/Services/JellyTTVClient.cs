@@ -18,7 +18,7 @@ public class JellyTTVClient
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         PropertyNameCaseInsensitive = true
     };
 
@@ -70,6 +70,22 @@ public class JellyTTVClient
             if (data == null)
             {
                 return null;
+            }
+
+            // Contract-drift guard: if the backend payload changed shape and every
+            // channel deserialized to defaults, log a warning so the operator can
+            // investigate instead of silently seeing an empty live list.
+            if (data.Channels is { Count: > 0 } channels)
+            {
+                var allDefaults = channels.TrueForAll(c =>
+                    c.Id == 0 && string.IsNullOrEmpty(c.Login) && !c.IsLive);
+                if (allDefaults)
+                {
+                    _logger.LogWarning(
+                        "JellyTTV returned {Count} channels but all deserialized to default values — " +
+                        "JSON contract may have changed. Raw payload: {Payload}",
+                        channels.Count, json.Length > 500 ? json[..500] + "..." : json);
+                }
             }
 
             // Rewrite thumbnail and avatar URLs to go through our proxy controller

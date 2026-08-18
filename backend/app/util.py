@@ -75,10 +75,29 @@ def parse_twitch_duration(value: str | None) -> int | None:
 
 
 def twitch_thumbnail(url: str | None, width: int = 1280, height: int = 720) -> str | None:
-    """Twitch thumbnail urls contain `%{width}`/`%{height}` placeholders."""
+    """Substitute Twitch's thumbnail size placeholders.
+
+    Twitch uses two different placeholder syntaxes depending on the endpoint:
+
+    * Get Videos (VODs)   -> ``.../thumb0-%{width}x%{height}.jpg``
+    * Get Streams (live)  -> ``.../live_user_x-{width}x{height}.jpg``
+
+    Only handling the ``%``-prefixed form left every *live* preview url with a
+    literal ``-{width}x{height}.jpg``, which Twitch's CDN 404s. Handle both.
+
+    Idempotent, so it is safe to re-apply to values that were already
+    substituted at write time.
+    """
     if not url:
         return None
-    return url.replace("%{width}", str(width)).replace("%{height}", str(height))
+    # Replace the %-prefixed form first so `%{width}` never degrades into a
+    # stray `%` followed by an already-substituted number.
+    return (
+        url.replace("%{width}", str(width))
+        .replace("%{height}", str(height))
+        .replace("{width}", str(width))
+        .replace("{height}", str(height))
+    )
 
 
 def normalise_channel_input(value: str) -> str:

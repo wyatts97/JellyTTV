@@ -9,6 +9,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import get_config
 from app.db import get_db
+from app.logging_conf import get_logger
 from app.models import Channel, EventLog, EventSubSubscription, StreamSession, Vod, VodMode
 from app.ratelimit import limiter
 from app.schemas import ChannelCreate, ChannelOut, ChannelUpdate, VodOut
@@ -19,6 +20,8 @@ from app.services.channels import ChannelError
 from app.services.settings_store import ResolvedSettings, get_settings
 from app.util import sanitize_filename, twitch_thumbnail, utcnow
 from app.worker.queue import enqueue
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -246,6 +249,16 @@ async def preview_paths(
     }
 
 
+async def _fetch_image(url: str) -> httpx.Response | None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        return None
+    return resp
+
+
 @router.get("/{channel_id}/thumbnail", response_class=Response)
 @limiter.limit("60/minute")
 async def channel_thumbnail(
@@ -253,22 +266,33 @@ async def channel_thumbnail(
     channel_id: int,
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
+    """Live preview for a channel, falling back to the avatar.
+
+    Never returns a broken image: if the live preview is missing or Twitch's CDN
+    refuses it, serve the streamer's avatar with a 200 instead. Callers render
+    the result directly, so a 404/502 here would surface as a broken card.
+    """
     channel = await channel_service.get_channel(session, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
 
+    # Re-normalise on read: rows written before the placeholder fix still hold a
+    # literal `-{width}x{height}.jpg`, and this repairs them transparently.
     url = twitch_thumbnail(channel.live_thumbnail_url)
-    if not url:
-        raise HTTPException(status_code=404, detail="No thumbnail available")
+    resp = await _fetch_image(url) if url else None
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream thumbnail returned {exc.response.status_code}") from None
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="failed to fetch thumbnail") from None
+    if resp is None:
+        if url:
+            log.debug(
+                "live thumbnail unavailable, falling back to avatar",
+                login=channel.twitch_login,
+                url=url,
+            )
+        if not channel.avatar_url:
+            raise HTTPException(status_code=404, detail="No thumbnail or avatar available")
+        resp = await _fetch_image(channel.avatar_url)
+        if resp is None:
+            raise HTTPException(status_code=502, detail="failed to fetch thumbnail or avatar")
 
     return Response(
         content=resp.content,

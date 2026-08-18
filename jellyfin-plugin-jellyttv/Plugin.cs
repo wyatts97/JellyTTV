@@ -15,7 +15,8 @@ namespace Jellyfin.Plugin.JellyTTV;
 /// </summary>
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
 {
-    private readonly JellyTTVScriptManager _scriptManager;
+    private readonly HomeScreenSectionsIntegration _hssIntegration;
+    private readonly PluginPagesIntegration _pluginPagesIntegration;
     private bool _disposed;
 
     /// <summary>
@@ -30,11 +31,13 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
         IApplicationPaths applicationPaths,
         IXmlSerializer xmlSerializer,
         ILogger<Plugin> logger,
-        JellyTTVScriptManager scriptManager)
+        HomeScreenSectionsIntegration hssIntegration,
+        PluginPagesIntegration pluginPagesIntegration)
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
-        _scriptManager = scriptManager;
+        _hssIntegration = hssIntegration;
+        _pluginPagesIntegration = pluginPagesIntegration;
     }
 
     /// <inheritdoc />
@@ -45,7 +48,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
 
     /// <inheritdoc />
     public override string Description =>
-        "Displays Twitch live streams in Jellyfin's web UI with a dedicated sidebar link and home screen section.";
+        "Displays Twitch live streams in Jellyfin via native Home Screen Sections and Plugin Pages integration.";
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()
@@ -78,7 +81,8 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
         }
 
         _disposed = true;
-        _scriptManager.Dispose();
+        _hssIntegration.Dispose();
+        _pluginPagesIntegration.Dispose();
         Instance = null;
     }
 }

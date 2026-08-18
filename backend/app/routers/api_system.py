@@ -18,7 +18,7 @@ from app.services import events as event_bus
 from app.services import eventsub as eventsub_service
 from app.services import library, resolver, vods
 from app.services.settings_store import get_settings
-from app.util import iso_z
+from app.util import iso_z, utcnow
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -40,6 +40,9 @@ async def live_channels(
     """
     rows = await channel_service.list_channels(session)
     live = [c for c in rows if c.is_live and c.enabled and c.live_enabled]
+    # Coarse cache-buster bucket (90s) so live preview thumbnails stay
+    # reasonably fresh without defeating caching entirely.
+    cache_bust = int(utcnow().timestamp()) // 90
     return {
         "channels": [
             {
@@ -50,8 +53,8 @@ async def live_channels(
                 "title": c.live_title,
                 "game_name": c.live_game,
                 "viewer_count": c.live_viewers,
-                "thumbnail_url": f"/api/channels/{c.id}/thumbnail" if c.live_thumbnail_url else None,
-                "avatar_url": f"/api/channels/{c.id}/avatar" if c.avatar_url else None,
+                "thumbnail_url": f"/api/channels/{c.id}/thumbnail?v={cache_bust}",
+                "avatar_url": f"/api/channels/{c.id}/avatar",
                 "started_at": iso_z(c.live_started_at),
             }
             for c in live

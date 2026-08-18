@@ -93,66 +93,128 @@ public class TwitchController : ControllerBase
         var config = Plugin.Instance?.Configuration;
         return Ok(new
         {
-            enableSidebarLink = config?.EnableSidebarLink ?? true,
             enableHomeSection = config?.EnableHomeSection ?? true,
-            enableNotifications = config?.EnableNotifications ?? true,
             refreshIntervalSeconds = config?.RefreshIntervalSeconds ?? 60
         });
     }
 
     /// <summary>
+    /// Gets the status of plugin dependencies (Home Screen Sections, Plugin Pages).
+    /// </summary>
+    [HttpGet("Status")]
+    [AllowAnonymous]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public IActionResult GetStatus()
+    {
+        var hssInstalled = IsAssemblyLoaded(".HomeScreenSections");
+        var pluginPagesInstalled = IsAssemblyLoaded(".PluginPages");
+
+        return Ok(new
+        {
+            homeScreenSectionsInstalled = hssInstalled,
+            pluginPagesInstalled = pluginPagesInstalled,
+            allDependenciesMet = hssInstalled && pluginPagesInstalled
+        });
+    }
+
+    private static bool IsAssemblyLoaded(string nameFragment)
+    {
+        return System.Runtime.Loader.AssemblyLoadContext.All
+            .SelectMany(x => x.Assemblies)
+            .Any(x => x.FullName?.Contains(nameFragment) ?? false);
+    }
+
+    /// <summary>
     /// Tests connectivity to a JellyTTV backend URL from the server side.
+    /// Reports staged errors so the user sees the actual failure reason.
     /// </summary>
     [HttpGet("TestConnection")]
+    [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> TestConnection([FromQuery] string url)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
-            return BadRequest(new { error = "URL is required" });
+            return BadRequest(new { success = false, error = "URL is required" });
+        }
+
+        var baseUrl = url.TrimEnd('/');
+
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != "http" && uri.Scheme != "https"))
+        {
+            return BadRequest(new { success = false, error = "Invalid URL — must start with http:// or https://" });
         }
 
         try
         {
-            var baseUrl = url.TrimEnd('/');
             var client = _httpClientFactory.CreateClient("JellyTTV");
             client.Timeout = TimeSpan.FromSeconds(10);
 
-            var response = await client.GetAsync($"{baseUrl}/api/live").ConfigureAwait(false);
-            if (response.IsSuccessStatusCode)
+            // Stage 1: reach the health endpoint
+            HttpResponseMessage healthResponse;
+            try
             {
-                return Ok(new { success = true, message = "Connected successfully" });
+                healthResponse = await client.GetAsync($"{baseUrl}/api/health").ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex)
+            {
+                var reason = ex.InnerException?.Message ?? ex.Message;
+                return StatusCode(503, new { success = false, error = $"Cannot reach server: {reason}" });
+            }
+            catch (TaskCanceledException)
+            {
+                return StatusCode(503, new { success = false, error = "Connection timed out (10s). Is the URL correct?" });
             }
 
-            return StatusCode(503, new { success = false, error = $"Server responded with status {response.StatusCode}" });
+            if (!healthResponse.IsSuccessStatusCode)
+            {
+                return StatusCode(503, new { success = false, error = $"Server responded with HTTP {(int)healthResponse.StatusCode} {healthResponse.StatusCode}" });
+            }
+
+            // Stage 2: verify the live endpoint returns valid data
+            HttpResponseMessage liveResponse;
+            try
+            {
+                liveResponse = await client.GetAsync($"{baseUrl}/api/live").ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex)
+            {
+                var reason = ex.InnerException?.Message ?? ex.Message;
+                return StatusCode(503, new { success = false, error = $"Health OK but /api/live unreachable: {reason}" });
+            }
+
+            if (!liveResponse.IsSuccessStatusCode)
+            {
+                return StatusCode(503, new { success = false, error = $"Health OK but /api/live returned HTTP {(int)liveResponse.StatusCode}" });
+            }
+
+            var liveJson = await liveResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (!liveJson.Contains("\"channels\""))
+            {
+                return StatusCode(503, new { success = false, error = "Server reachable but /api/live response does not contain expected 'channels' field" });
+            }
+
+            return Ok(new { success = true, message = "Connected successfully to JellyTTV" });
         }
         catch (Exception ex)
         {
-            return StatusCode(503, new { success = false, error = ex.Message });
+            _logger.LogError(ex, "Unexpected error testing connection to {Url}", baseUrl);
+            return StatusCode(503, new { success = false, error = $"Unexpected error: {ex.Message}" });
         }
     }
 
     /// <summary>
-    /// Serves the plugin's JavaScript file as an embedded resource.
+    /// Serves the Twitch page HTML for Plugin Pages integration.
     /// </summary>
-    [HttpGet("twitch.js")]
+    [HttpGet("Page")]
     [AllowAnonymous]
-    [Produces("application/javascript")]
-    public IActionResult GetScript()
+    [Produces("text/html")]
+    public IActionResult GetPage()
     {
-        return GetEmbeddedResource("Web.twitch.js", "application/javascript");
-    }
-
-    /// <summary>
-    /// Serves the plugin's CSS file as an embedded resource.
-    /// </summary>
-    [HttpGet("twitch.css")]
-    [AllowAnonymous]
-    [Produces("text/css")]
-    public IActionResult GetStyles()
-    {
-        return GetEmbeddedResource("Web.twitch.css", "text/css");
+        return GetEmbeddedResource("Web.twitchPage.html", "text/html");
     }
 
     private IActionResult GetEmbeddedResource(string resourcePath, string contentType)

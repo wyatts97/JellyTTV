@@ -62,9 +62,18 @@ def test_sanitize_filename_strips_illegal_characters():
 
 
 def test_twitch_thumbnail_placeholder_expansion():
+    # VOD format: %{width} / %{height}
     url = "https://cdn/preview-%{width}x%{height}.jpg"
     assert twitch_thumbnail(url, 320, 180) == "https://cdn/preview-320x180.jpg"
     assert twitch_thumbnail(None) is None
+
+    # Live stream format: {width} / {height}
+    live_url = "https://cdn/live-{width}x{height}.jpg"
+    assert twitch_thumbnail(live_url, 320, 180) == "https://cdn/live-320x180.jpg"
+
+    # Mixed / already-substituted URL should be unchanged
+    resolved = "https://cdn/preview-1280x720.jpg"
+    assert twitch_thumbnail(resolved, 320, 180) == "https://cdn/preview-1280x720.jpg"
 
 
 def test_parse_twitch_time_returns_naive_utc():

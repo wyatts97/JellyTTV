@@ -3,11 +3,19 @@
         "category": "General",
         "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "name": "JellyTTV",
-        "description": "Displays Twitch live streams in Jellyfin's web UI with a dedicated sidebar link and home screen section.",
+        "description": "Displays Twitch live streams in Jellyfin via native Home Screen Sections and Plugin Pages integration.",
         "owner": "JellyTTV",
-        "overview": "Companion plugin for JellyTTV that integrates Twitch live streams into Jellyfin's navigation and home screen.",
+        "overview": "Companion plugin for JellyTTV that integrates Twitch live streams into Jellyfin using native Home Screen Sections and Plugin Pages. Requires the Home Screen Sections and Plugin Pages plugins.",
         "imagePath": "icon-512.png",
         "versions": [
+            {
+                "checksum": "BDC3B676E874993A667D54323C02587F",
+                "changelog": "v0.3.0 — Breaking architecture change: replaced DOM injection with native Home Screen Sections and Plugin Pages integration. Requires HSS and Plugin Pages plugins. Removed API key, sidebar link, and notifications settings. Fixed JSON snake_case deserialization, live thumbnail placeholder bug, and Test Connection staged error reporting. Added avatar fallback for thumbnails and cache-busting for live preview images.",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.3.0/jellyttv-v0.3.0.zip",
+                "timestamp": "2026-08-17T00:00:00Z",
+                "version": "0.3.0.0"
+            },
             {
                 "checksum": "A62A3973C846D275D5803892516D2200",
                 "changelog": "Fix script injection, add AllowAnonymous, add /Config endpoint, fix Test Connection, fix disable/uninstall hang, support Jellyfin 10.11.x.",

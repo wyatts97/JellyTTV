@@ -1,0 +1,166 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Jellyfin.Plugin.JellyTTV</name>
+    </assembly>
+    <members>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Configuration.PluginConfiguration">
+            <summary>
+            Plugin configuration for JellyTTV integration.
+            </summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Configuration.PluginConfiguration.JellyTTVUrl">
+            <summary>
+            Gets or sets the base URL of the JellyTTV backend (e.g. http://jellyttv-api:8730).
+            </summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Configuration.PluginConfiguration.EnableHomeSection">
+            <summary>
+            Gets or sets a value indicating whether the "Live on Twitch" home screen section is shown.
+            </summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Configuration.PluginConfiguration.RefreshIntervalSeconds">
+            <summary>
+            Gets or sets the refresh interval in seconds for polling live data.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController">
+            <summary>
+            API controller that proxies requests from Jellyfin's web UI to the JellyTTV backend.
+            This avoids CORS issues since the web client talks to same-origin endpoints.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetLive">
+            <summary>
+            Gets the list of live Twitch channels from JellyTTV.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetThumbnail(System.Int32)">
+            <summary>
+            Proxies a channel thumbnail image from JellyTTV.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetAvatar(System.Int32)">
+            <summary>
+            Proxies a channel avatar image from JellyTTV.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetConfig">
+            <summary>
+            Gets the plugin's display configuration for the client script.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetStatus">
+            <summary>
+            Gets the status of plugin dependencies (Home Screen Sections, Plugin Pages).
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.TestConnection(System.String)">
+            <summary>
+            Tests connectivity to a JellyTTV backend URL from the server side.
+            Reports staged errors so the user sees the actual failure reason.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Controllers.TwitchController.GetPage">
+            <summary>
+            Serves the Twitch page HTML for Plugin Pages integration.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.HomeScreenSectionsIntegration">
+            <summary>
+            Registers a "Live on Twitch" home screen section with the Home Screen Sections plugin
+            via reflection (to avoid AssemblyLoadContext type mismatches).
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Plugin">
+            <summary>
+            Main plugin class for JellyTTV integration.
+            Injects custom JavaScript into Jellyfin's web UI to add Twitch live streams
+            to the sidebar navigation and home screen.
+            </summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Plugin.Instance">
+            <summary>
+            Gets the singleton plugin instance.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.#ctor(MediaBrowser.Common.Configuration.IApplicationPaths,MediaBrowser.Model.Serialization.IXmlSerializer,Microsoft.Extensions.Logging.ILogger{Jellyfin.Plugin.JellyTTV.Plugin},Jellyfin.Plugin.JellyTTV.HomeScreenSectionsIntegration,Jellyfin.Plugin.JellyTTV.PluginPagesIntegration)">
+            <summary>
+            Initializes a new instance of the <see cref="T:Jellyfin.Plugin.JellyTTV.Plugin"/> class.
+            </summary>
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Plugin.Name">
+            <inheritdoc />
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Plugin.Id">
+            <inheritdoc />
+        </member>
+        <member name="P:Jellyfin.Plugin.JellyTTV.Plugin.Description">
+            <inheritdoc />
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.GetPages">
+            <inheritdoc />
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.OnUninstalling">
+            <inheritdoc />
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Plugin.Dispose">
+            <inheritdoc />
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.PluginPagesIntegration">
+            <summary>
+            Registers a "Twitch" page with the Plugin Pages plugin by writing to its config.json.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.ServiceRegistrator">
+            <summary>
+            Registers plugin services with Jellyfin's DI container.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.ServiceRegistrator.RegisterServices(Microsoft.Extensions.DependencyInjection.IServiceCollection,MediaBrowser.Controller.IServerApplicationHost)">
+            <inheritdoc />
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Services.JellyTTVClient">
+            <summary>
+            HTTP client for communicating with the JellyTTV backend API.
+            Caches responses to avoid excessive polling.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Services.JellyTTVClient.GetLiveChannelsAsync">
+            <summary>
+            Gets the live channel data from JellyTTV, with caching.
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.Services.JellyTTVClient.GetImageAsync(System.Int32,System.String)">
+            <summary>
+            Fetches a raw image (thumbnail or avatar) from JellyTTV's proxy endpoint.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Services.LiveChannelData">
+            <summary>
+            Response model matching JellyTTV's /api/system endpoint.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.Services.LiveChannelInfo">
+            <summary>
+            Individual live channel info as returned by JellyTTV.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler">
+            <summary>
+            Results handler invoked by the Home Screen Sections plugin to populate
+            the "Live on Twitch" section. HSS creates instances via DI (ActivatorUtilities).
+            </summary>
+        </member>
+        <member name="M:Jellyfin.Plugin.JellyTTV.TwitchResultsHandler.GetResults(Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload)">
+            <summary>
+            Returns live Twitch channels as a QueryResult of BaseItemDto for the HSS section.
+            </summary>
+        </member>
+        <member name="T:Jellyfin.Plugin.JellyTTV.HomeScreenSectionPayload">
+            <summary>
+            Payload received from the Home Screen Sections plugin when requesting section results.
+            </summary>
+        </member>
+    </members>
+</doc>
