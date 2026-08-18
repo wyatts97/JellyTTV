@@ -14,11 +14,13 @@ namespace Jellyfin.Plugin.JellyTTV;
 ///   2. File Transformation (content transformation registration)
 /// Falls back to the built-in IStartupFilter middleware otherwise.
 /// </summary>
-public class JellyTTVScriptManager
+public sealed class JellyTTVScriptManager : IDisposable
 {
     private static readonly Guid PluginId = Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
 
     private readonly ILogger<JellyTTVScriptManager> _logger;
+    private readonly CancellationTokenSource _cts = new();
+    private bool _disposed;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="JellyTTVScriptManager"/> class
@@ -35,15 +37,22 @@ public class JellyTTVScriptManager
         }
 
         // Otherwise retry in the background; JS Injector may not be ready at startup.
-        _ = RetryExternalRegistrationAsync();
+        _ = RetryExternalRegistrationAsync(_cts.Token);
     }
 
-    private async Task RetryExternalRegistrationAsync()
+    private async Task RetryExternalRegistrationAsync(CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= 5; attempt++)
         {
             _logger.LogDebug("JellyTTV external registration attempt {Attempt}", attempt);
-            await Task.Delay(TimeSpan.FromSeconds(2 * attempt)).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
 
             try
             {
@@ -60,6 +69,19 @@ public class JellyTTVScriptManager
         }
 
         _logger.LogWarning("JellyTTV could not register with an external injection plugin; relying on built-in middleware");
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _cts.Cancel();
+        _cts.Dispose();
     }
 
     private bool TryExternalRegistration()

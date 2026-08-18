@@ -13,8 +13,11 @@ namespace Jellyfin.Plugin.JellyTTV;
 /// Injects custom JavaScript into Jellyfin's web UI to add Twitch live streams
 /// to the sidebar navigation and home screen.
 /// </summary>
-public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
+public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages, IDisposable
 {
+    private readonly JellyTTVScriptManager _scriptManager;
+    private bool _disposed;
+
     /// <summary>
     /// Gets the singleton plugin instance.
     /// </summary>
@@ -31,7 +34,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         : base(applicationPaths, xmlSerializer)
     {
         Instance = this;
-        _ = scriptManager;
+        _scriptManager = scriptManager;
     }
 
     /// <inheritdoc />
@@ -57,5 +60,25 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
                 EnableInMainMenu = false
             }
         };
+    }
+
+    /// <inheritdoc />
+    public override void OnUninstalling()
+    {
+        Dispose();
+        base.OnUninstalling();
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _scriptManager.Dispose();
+        Instance = null;
     }
 }
