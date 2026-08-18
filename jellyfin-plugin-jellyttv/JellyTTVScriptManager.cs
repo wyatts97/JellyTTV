@@ -97,7 +97,7 @@ public sealed class JellyTTVScriptManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "JavaScript Injector registration failed");
+            _logger.LogWarning(ex, "JavaScript Injector registration failed");
         }
 
         try
@@ -111,10 +111,10 @@ public sealed class JellyTTVScriptManager : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "File Transformation registration failed");
+            _logger.LogWarning(ex, "File Transformation registration failed");
         }
 
-        _logger.LogInformation("No external injection plugin found; using built-in middleware");
+        _logger.LogWarning("No external injection plugin found; using built-in middleware");
         IsExternal = false;
         return false;
     }
@@ -153,12 +153,15 @@ public sealed class JellyTTVScriptManager : IDisposable
     {
         var assembly = AssemblyLoadContext.All
             .SelectMany(x => x.Assemblies)
-            .FirstOrDefault(x => x.FullName?.Contains("Jellyfin.Plugin.JavaScriptInjector") ?? false);
+            .FirstOrDefault(x => string.Equals(x.GetName().Name, "Jellyfin.Plugin.JavaScriptInjector", StringComparison.Ordinal));
 
         if (assembly == null)
         {
+            _logger.LogDebug("JavaScript Injector assembly not found");
             return false;
         }
+
+        _logger.LogDebug("Found JavaScript Injector assembly: {Assembly}", assembly.FullName);
 
         var type = assembly.GetType("Jellyfin.Plugin.JavaScriptInjector.PluginInterface");
         if (type == null)
@@ -199,8 +202,25 @@ public sealed class JellyTTVScriptManager : IDisposable
             return false;
         }
 
-        var result = method.Invoke(null, new object[] { registration });
-        return result is true;
+        try
+        {
+            var result = method.Invoke(null, new object[] { registration });
+            if (result is true)
+            {
+                _logger.LogDebug("JavaScript Injector RegisterScript returned true");
+                return true;
+            }
+            else
+            {
+                _logger.LogWarning("JavaScript Injector RegisterScript returned {Result}", result);
+                return false;
+            }
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
+        {
+            _logger.LogDebug("JavaScript Injector not ready yet: {Message}", ex.InnerException.Message);
+            return false;
+        }
     }
 
     private bool TryRegisterWithFileTransformation()

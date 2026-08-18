@@ -44,13 +44,17 @@ public class JellyTTVStartupFilter : IStartupFilter
                 // Pre-filter on path only — ContentType isn't available until after downstream middleware runs.
                 var path = context.Request.Path.Value ?? string.Empty;
                 var isIndex = path.EndsWith("/index.html", StringComparison.OrdinalIgnoreCase)
-                              || path.EndsWith("/web", StringComparison.OrdinalIgnoreCase);
+                              || path.EndsWith("/web", StringComparison.OrdinalIgnoreCase)
+                              || path.EndsWith("/web/", StringComparison.OrdinalIgnoreCase)
+                              || path.Equals("/", StringComparison.OrdinalIgnoreCase);
 
                 if (!isIndex)
                 {
                     await nextMiddleware().ConfigureAwait(false);
                     return;
                 }
+
+                _logger.LogDebug("JellyTTV middleware intercepting path: {Path}", path);
 
                 // Capture the response body by swapping in a MemoryStream.
                 var originalBody = context.Response.Body;
