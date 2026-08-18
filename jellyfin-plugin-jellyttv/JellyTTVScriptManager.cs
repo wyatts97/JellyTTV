@@ -202,25 +202,75 @@ public sealed class JellyTTVScriptManager : IDisposable
             return false;
         }
 
-        try
+        // Check if the method accepts a JObject or a string parameter.
+        var parameters = method.GetParameters();
+        if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
         {
-            var result = method.Invoke(null, new object[] { registration });
-            if (result is true)
+            // String overload - serialize our JObject to string.
+            try
             {
-                _logger.LogDebug("JavaScript Injector RegisterScript returned true");
-                return true;
+                var json = registration.ToString();
+                var result = method.Invoke(null, new object[] { json });
+                if (result is true)
+                {
+                    _logger.LogDebug("JavaScript Injector RegisterScript(string) returned true");
+                    return true;
+                }
+                else
+                {
+                    _logger.LogWarning("JavaScript Injector RegisterScript(string) returned {Result}", result);
+                    return false;
+                }
             }
-            else
+            catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
             {
-                _logger.LogWarning("JavaScript Injector RegisterScript returned {Result}", result);
+                _logger.LogDebug("JavaScript Injector not ready yet: {Message}", ex.InnerException.Message);
                 return false;
             }
         }
-        catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
+        else
         {
-            _logger.LogDebug("JavaScript Injector not ready yet: {Message}", ex.InnerException.Message);
-            return false;
+            // JObject overload - use the target assembly's own JObject type to avoid mismatch.
+            var targetJsonAssembly = assembly.GetType("Newtonsoft.Json.Linq.JObject")?.Assembly;
+            if (targetJsonAssembly == null)
+            {
+                _logger.LogWarning("Could not find target assembly's JObject type");
+                return false;
+            }
+
+            var targetJObjectType = targetJsonAssembly.GetType("Newtonsoft.Json.Linq.JObject");
+            var parseMethod = targetJObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+            if (parseMethod == null)
+            {
+                _logger.LogWarning("Could not find JObject.Parse method on target assembly");
+                return false;
+            }
+
+            try
+            {
+                var json = registration.ToString();
+                var targetJObject = parseMethod.Invoke(null, new object[] { json });
+                var result = method.Invoke(null, new[] { targetJObject });
+                if (result is true)
+                {
+                    _logger.LogDebug("JavaScript Injector RegisterScript(JObject) returned true");
+                    return true;
+                }
+                else
+                {
+                    _logger.LogWarning("JavaScript Injector RegisterScript(JObject) returned {Result}", result);
+                    return false;
+                }
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
+            {
+                _logger.LogDebug("JavaScript Injector not ready yet: {Message}", ex.InnerException.Message);
+                return false;
+            }
         }
+
+        // Should not reach here - both branches above return.
+        return false;
     }
 
     private bool TryRegisterWithFileTransformation()
@@ -257,8 +307,36 @@ public sealed class JellyTTVScriptManager : IDisposable
             return false;
         }
 
-        var result = method.Invoke(null, new object?[] { payload });
-        return result is true;
+        // Use the target assembly's own JObject type to avoid cross-AssemblyLoadContext type mismatch.
+        var targetJObjectType = assembly.GetType("Newtonsoft.Json.Linq.JObject");
+        var parseMethod = targetJObjectType?.GetMethod("Parse", BindingFlags.Public | BindingFlags.Static, new[] { typeof(string) });
+        if (parseMethod == null)
+        {
+            _logger.LogWarning("Could not find JObject.Parse on target assembly");
+            return false;
+        }
+
+        try
+        {
+            var json = payload.ToString();
+            var targetJObject = parseMethod.Invoke(null, new object[] { json });
+            var result = method.Invoke(null, new[] { targetJObject });
+            if (result is true)
+            {
+                _logger.LogDebug("File Transformation RegisterTransformation returned true");
+                return true;
+            }
+            else
+            {
+                _logger.LogWarning("File Transformation RegisterTransformation returned {Result}", result);
+                return false;
+            }
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is InvalidOperationException)
+        {
+            _logger.LogDebug("File Transformation not ready yet: {Message}", ex.InnerException.Message);
+            return false;
+        }
     }
 }
 

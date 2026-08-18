@@ -9,7 +9,7 @@
         "imagePath": "icon-512.png",
         "versions": [
             {
-                "checksum": "03AF543ACFCD307AC584F9B4038AD270",
+                "checksum": "DBE07FC751744E01BE51C3A411CC69D4",
                 "changelog": "Fix script injection, add AllowAnonymous, add /Config endpoint, fix Test Connection, fix disable/uninstall hang, support Jellyfin 10.11.x.",
                 "targetAbi": "10.11.0.0",
                 "sourceUrl": "https://github.com/wyatts97/JellyTTV/releases/download/v0.2.0/jellyttv-v0.2.0.zip",
