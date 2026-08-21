@@ -248,7 +248,15 @@ function LiveCard({ channel }: { channel: LiveChannel }) {
       <div className="space-y-2 p-3.5">
         <div className="flex items-center gap-2">
           {channel.avatar_url && (
-            <img src={channel.avatar_url} alt="" className="size-6 rounded-full" loading="lazy" />
+            <img
+              src={channel.avatar_url}
+              alt=""
+              className="size-6 rounded-full"
+              loading="lazy"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+              }}
+            />
           )}
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-white">
             {channel.display_name}

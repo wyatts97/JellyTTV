@@ -22,6 +22,13 @@ from app.util import twitch_thumbnail, utcnow, xmltv_time
 
 OFFLINE_PROGRAMME_TITLE = "Offline"
 
+# Offline placeholders start this far in the future, never at "now": Jellyfin
+# treats any programme covering the current time as "on now" regardless of
+# title, so a gap has to exist at the current moment. This buffer must stay
+# comfortably above the guide refresh cadence (worker cron, ~10 min) so the
+# gap is always still ahead of "now" by the time Jellyfin re-fetches.
+OFFLINE_GAP = timedelta(minutes=20)
+
 
 def _stream_url(base_url: str, channel: Channel, token: str | None) -> str:
     url = f"{base_url.rstrip('/')}/hls/{quote(channel.twitch_login)}/master.m3u8"
@@ -126,6 +133,11 @@ def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> N
             live=True,
         )
         cursor = live_end
+    else:
+        # Leave a gap at "now" (see OFFLINE_GAP) so Jellyfin's "On Now" widget,
+        # which just looks for a programme covering the current time, correctly
+        # shows nothing for a channel that isn't actually live.
+        cursor = now + OFFLINE_GAP
 
     while cursor < window_end:
         stop = min(cursor + timedelta(hours=4), window_end)

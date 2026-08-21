@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Annotated
 
 import httpx
@@ -24,6 +25,12 @@ from app.worker.queue import enqueue
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
+
+# 1x1 transparent PNG, served when an avatar is missing/unreachable so the
+# frontend never has to render a browser's native broken-image icon.
+_BLANK_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
 
 
 def _to_out(channel: Channel, settings: ResolvedSettings, counts: dict[str, int]) -> ChannelOut:
@@ -308,20 +315,23 @@ async def channel_avatar(
     channel_id: int,
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
+    """Streamer avatar.
+
+    Never returns a broken image: a missing or unreachable avatar serves a
+    blank 1x1 PNG with a 200 instead, so the small avatar next to the
+    streamer name never renders a browser's native broken-image icon.
+    """
     channel = await channel_service.get_channel(session, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if not channel.avatar_url:
-        raise HTTPException(status_code=404, detail="No avatar available")
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(channel.avatar_url)
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream avatar returned {exc.response.status_code}") from None
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="failed to fetch avatar") from None
+    resp = await _fetch_image(channel.avatar_url) if channel.avatar_url else None
+    if resp is None:
+        return Response(
+            content=_BLANK_PNG,
+            media_type="image/png",
+            headers={"Cache-Control": "max-age=30"},
+        )
 
     return Response(
         content=resp.content,

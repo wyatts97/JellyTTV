@@ -9,6 +9,8 @@ Endpoints used:
   POST /Library/Refresh        - full library scan (requires elevation)
   POST /Items/{id}/Refresh     - targeted refresh, preferred when we know the id
   GET  /Items?...              - locate our series items by name
+  GET  /ScheduledTasks         - resolve the "Refresh Guide" task's id
+  POST /ScheduledTasks/Running/{taskId} - trigger the Live TV guide refresh
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ class JellyfinClient:
         self._timeout = timeout
         self._external = client
         self._client = client
+        self._refresh_guide_task_id: str | None = None
 
     async def __aenter__(self) -> JellyfinClient:
         if self._client is None:
@@ -159,6 +162,21 @@ class JellyfinClient:
         items = payload.get("Items") or []
         return items[0].get("Id") if items else None
 
+    async def _resolve_refresh_guide_task_id(self) -> str:
+        """Look up the 'Refresh Guide' scheduled task's id.
+
+        Jellyfin's `/ScheduledTasks/Running/{taskId}` requires the task's actual
+        GUID, not its stable `Key` ("RefreshGuide") - there is no name-based
+        route. The id is stable per Jellyfin install, so callers should cache it.
+        """
+        tasks = await self._request("GET", "/ScheduledTasks") or []
+        for task in tasks:
+            if task.get("Key") == "RefreshGuide":
+                task_id = task.get("Id")
+                if task_id:
+                    return task_id
+        raise JellyfinError("could not find the 'Refresh Guide' scheduled task")
+
     async def refresh_guide(self) -> None:
         """Trigger Jellyfin's 'Refresh Guide' scheduled task.
 
@@ -166,7 +184,21 @@ class JellyfinClient:
         guide data, so channel live/offline state and programme metadata is
         current without waiting for the default 24h interval.
         """
-        await self._request("POST", "/ScheduledTasks/Running/RefreshGuide")
+        if self._refresh_guide_task_id is None:
+            self._refresh_guide_task_id = await self._resolve_refresh_guide_task_id()
+
+        try:
+            await self._request(
+                "POST", f"/ScheduledTasks/Running/{self._refresh_guide_task_id}"
+            )
+        except JellyfinError as exc:
+            if exc.status != 404:
+                raise
+            # The id may have changed (e.g. across a Jellyfin upgrade); re-resolve once.
+            self._refresh_guide_task_id = await self._resolve_refresh_guide_task_id()
+            await self._request(
+                "POST", f"/ScheduledTasks/Running/{self._refresh_guide_task_id}"
+            )
         log.info("triggered jellyfin guide refresh")
 
     async def refresh(self, *, library_id: str | None = None) -> str:

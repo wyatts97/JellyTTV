@@ -42,6 +42,8 @@ CRON_JOBS = [
     cron(tasks.poll_live, minute=set(range(0, 60, 2)), run_at_startup=True),
     # Keep Twitch's subscription list in sync with our enabled channels.
     cron(tasks.reconcile_eventsub, minute={7}, run_at_startup=True),
+    # Safety net in case a reactive refresh_guide enqueue was missed/deduped.
+    cron(tasks.jellyfin_refresh_guide, minute=set(range(0, 60, 10))),
     # Periodic VOD catalogue refresh in case an offline event was missed.
     cron(tasks.sync_all_vods, hour={1, 7, 13, 19}, minute={11}),
     cron(tasks.retention_sweep, hour={3}, minute={17}),
