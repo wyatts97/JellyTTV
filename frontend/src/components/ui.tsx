@@ -181,9 +181,15 @@ export function Toggle({
           checked ? 'bg-twitch-600' : 'bg-ink-600',
         )}
       >
+        {/*
+          `left-0` is load-bearing: without a horizontal anchor an absolutely
+          positioned child falls back to its static position, and a <button>
+          centres its content - so the knob started from the middle of the track
+          and the `on` translate pushed it outside the pill entirely.
+        */}
         <span
           className={cn(
-            'absolute top-0.5 size-4 rounded-full bg-white transition-transform',
+            'absolute top-0.5 left-0 size-4 rounded-full bg-white transition-transform',
             checked ? 'translate-x-4.5' : 'translate-x-0.5',
           )}
         />

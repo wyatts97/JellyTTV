@@ -6,6 +6,7 @@ from app.services.hls import (
     is_ad_daterange,
     is_master_playlist,
     parse_attributes,
+    parse_media_playlist,
     rewrite_master,
     rewrite_playlist,
 )
@@ -116,7 +117,10 @@ def test_ads_are_kept_when_stripping_is_disabled():
     result = rewrite_playlist(MEDIA_WITH_STITCHED_ADS, BASE, strip_ads=False)
     assert result.removed_segments == 0
     assert "ad0.ts" in result.text
-    assert "twitch-stitched-ad" in result.text
+    # The DATERANGE tag itself is never echoed: we render from parsed segments,
+    # and a marker describing a window we did not reproduce byte-for-byte would
+    # only mislead the player.
+    assert "twitch-stitched-ad" not in result.text
 
 
 def test_segments_can_be_routed_through_a_rewriter():
@@ -127,16 +131,112 @@ def test_segments_can_be_routed_through_a_rewriter():
     assert result.text.count("https://jellyttv.local/hls/x/seg?u=") == 3
 
 
-def test_prefetch_tags_are_absolutised_but_dropped_inside_ads():
-    playlist = (
-        MEDIA_WITH_STITCHED_ADS
-        + "#EXT-X-TWITCH-PREFETCH:next.ts\n"
-    )
+def test_prefetch_tags_are_collected_but_never_emitted():
+    """Prefetch entries are speculative and carry no EXTINF.
+
+    They cannot be given a sequence number, and Twitch prefetches ad segments
+    too - emitting them would smuggle back the ads we just stripped.
+    """
+    playlist = MEDIA_WITH_STITCHED_ADS + "#EXT-X-TWITCH-PREFETCH:next.ts\n"
     result = rewrite_playlist(playlist, BASE)
-    assert (
-        "#EXT-X-TWITCH-PREFETCH:https://video-weaver.example.hls.ttvnw.net/v1/playlist/next.ts"
-        in result.text
+    assert "#EXT-X-TWITCH-PREFETCH" not in result.text
+    assert "next.ts" not in result.text
+
+    parsed = parse_media_playlist(playlist, BASE)
+    assert parsed.prefetch_uris == [
+        "https://video-weaver.example.hls.ttvnw.net/v1/playlist/next.ts"
+    ]
+
+
+# ------------------------------------------------- regressions: total blackout
+MEDIA_DURATIONLESS_AD = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-DATERANGE:ID="stitched-ad-7",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z"
+#EXTINF:2.000,
+ad0.ts
+#EXTINF:2.000,
+ad1.ts
+#EXTINF:2.000,
+ad2.ts
+"""
+
+MEDIA_AMAZON_IN_TITLE = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:2.000,Amazon haul unboxing
+seg100.ts
+#EXTINF:2.000,Amazon haul unboxing
+seg101.ts
+"""
+
+MEDIA_LOW_LATENCY = """#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.0
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXTINF:2.000,
+seg100.ts
+#EXT-X-PART:DURATION=0.5,URI="part0.ts"
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part1.ts"
+#EXT-X-RENDITION-REPORT:URI="../720p60/index.m3u8",LAST-MSN=101
+"""
+
+
+def test_duration_less_daterange_does_not_empty_the_playlist():
+    """A DATERANGE with no DURATION used to strip the entire window.
+
+    Zero segments is a fatal error for ffmpeg - this is the "will not connect at
+    all" symptom. The live edge must survive.
+    """
+    result = rewrite_playlist(MEDIA_DURATIONLESS_AD, BASE)
+    assert result.segment_count >= 1
+    assert result.text.strip().endswith("ad2.ts")
+
+
+def test_all_ads_falls_back_to_passthrough_rather_than_empty():
+    parsed = parse_media_playlist(MEDIA_DURATIONLESS_AD, BASE)
+    # Force the pathological case: everything marked as an ad.
+    for seg in parsed.segments:
+        seg.is_ad = True
+    result = rewrite_playlist(MEDIA_DURATIONLESS_AD, BASE)
+    assert result.segment_count > 0
+
+
+def test_ad_title_heuristic_ignores_the_word_amazon_in_a_stream_title():
+    """`amazon` alone used to match, blanking any stream about Amazon."""
+    result = rewrite_playlist(MEDIA_AMAZON_IN_TITLE, BASE)
+    assert result.removed_segments == 0
+    assert result.segment_count == 2
+
+
+def test_non_ad_daterange_with_twitch_attributes_is_kept():
+    assert not is_ad_daterange(
+        {"CLASS": "twitch-trigger", "X-TV-TWITCH-AD-SIGNAL-ID": "abc"}
     )
+
+
+def test_low_latency_tags_are_dropped_not_emitted_with_relative_uris():
+    parsed = parse_media_playlist(MEDIA_LOW_LATENCY, BASE)
+    assert parsed.is_low_latency
+    assert "#EXT-X-PART" in parsed.dropped_tags
+
+    result = rewrite_playlist(MEDIA_LOW_LATENCY, BASE)
+    for tag in ("#EXT-X-PART", "#EXT-X-PRELOAD-HINT", "#EXT-X-RENDITION-REPORT"):
+        assert tag not in result.text
+    # No relative URI may survive into the output.
+    assert "part0.ts" not in result.text
+    assert "part1.ts" not in result.text
+
+
+def test_parse_marks_ads_rather_than_dropping_them():
+    parsed = parse_media_playlist(MEDIA_WITH_STITCHED_ADS, BASE)
+    assert len(parsed.segments) == 6
+    assert parsed.ad_segment_count == 3
+    assert [s.ad_source for s in parsed.segments if s.is_ad] == ["daterange"] * 3
 
 
 def test_master_playlist_detection_and_variant_rewriting():

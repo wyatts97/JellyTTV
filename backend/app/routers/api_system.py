@@ -16,7 +16,7 @@ from app.security import AdminUser
 from app.services import channels as channel_service
 from app.services import events as event_bus
 from app.services import eventsub as eventsub_service
-from app.services import library, resolver, vods
+from app.services import images, library, resolver, stream_session, vods
 from app.services.settings_store import get_settings
 from app.util import iso_z, utcnow
 
@@ -239,8 +239,25 @@ async def diagnostics(
         "eventsub": await eventsub_service.subscription_health(session),
         "config": {
             "resolver_cache_seconds": cfg.resolver_cache_seconds,
+            "resolver_session_ttl_seconds": cfg.resolver_session_ttl_seconds,
             "max_concurrent_downloads": cfg.max_concurrent_downloads,
             "min_free_disk_gib": cfg.min_free_disk_gib,
+        },
+        "stream_sessions": stream_session.stats(),
+        # What each channel's artwork actually resolves to, plus any recent
+        # fetch failure. Blank avatars used to be silent; this makes them
+        # explainable without turning on debug logging.
+        "images": {
+            "channels": [
+                {
+                    "id": c.id,
+                    "login": c.twitch_login,
+                    "avatar_url": c.avatar_url,
+                    "live_thumbnail_url": c.live_thumbnail_url,
+                }
+                for c in await channel_service.list_channels(session)
+            ],
+            "recent_failures": images.failure_report(),
         },
     }
 

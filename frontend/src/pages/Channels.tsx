@@ -136,19 +136,18 @@ function ChannelCard({
     <Card>
       <CardBody className="space-y-4">
         <div className="flex items-start gap-3">
-          {channel.avatar_url ? (
-            /* Served via our own origin: static-cdn.jtvnw.net is on common ad-block lists. */
-            <img
-              src={`/api/channels/${channel.id}/avatar`}
-              alt=""
-              className="size-11 rounded-full"
-              loading="lazy"
-            />
-          ) : (
-            <div className="grid size-11 place-items-center rounded-full bg-ink-700 text-ink-300">
-              <Tv className="size-5" aria-hidden />
-            </div>
-          )}
+          {/*
+            Served via our own origin: static-cdn.jtvnw.net is on common
+            ad-block lists. The endpoint always returns an image - a generated
+            initial-letter avatar when Twitch has none - so there is no
+            fallback branch here.
+          */}
+          <img
+            src={`/api/channels/${channel.id}/avatar`}
+            alt=""
+            className="size-11 rounded-full bg-ink-700"
+            loading="lazy"
+          />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h3 className="min-w-0 truncate text-sm font-semibold text-white">

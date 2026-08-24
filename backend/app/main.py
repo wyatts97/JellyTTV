@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,6 +16,7 @@ from app.ratelimit import limiter
 from app.routers import (
     api_auth,
     api_channels,
+    api_debug,
     api_settings,
     api_system,
     api_vods,
@@ -22,6 +24,8 @@ from app.routers import (
     hls,
     tuner,
 )
+from app.services import http as shared_http
+from app.services import stream_session
 from app.services.events import close_redis
 from app.services.settings_store import get_settings_row
 from app.worker.queue import close_pool, enqueue
@@ -46,9 +50,14 @@ async def lifespan(app: FastAPI):
         )
     # Nudge the worker so subscriptions/library state converge after a restart.
     await enqueue("reconcile_eventsub", job_id="reconcile_eventsub", defer_seconds=15)
+    sweeper = asyncio.create_task(stream_session.sweeper_task())
     try:
         yield
     finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
+        await shared_http.aclose()
         await close_pool()
         await close_redis()
         await dispose_engine()
@@ -77,6 +86,7 @@ app.include_router(api_settings.router)
 app.include_router(api_channels.router)
 app.include_router(api_vods.router)
 app.include_router(api_system.router)
+app.include_router(api_debug.router)
 app.include_router(tuner.router)
 app.include_router(hls.router)
 app.include_router(eventsub.router)

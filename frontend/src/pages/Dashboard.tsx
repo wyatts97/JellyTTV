@@ -220,44 +220,25 @@ function Stat({
 function LiveCard({ channel }: { channel: LiveChannel }) {
   return (
     <div className="overflow-hidden rounded-lg border border-ink-700/70 bg-ink-850">
-      {channel.thumbnail_url ? (
-        <img
-          src={channel.thumbnail_url}
-          alt=""
-          className="aspect-video w-full object-cover"
-          loading="lazy"
-          onError={(e) => {
-            e.currentTarget.style.display = 'none'
-            const fallback = e.currentTarget.nextElementSibling as HTMLElement | null
-            if (fallback) fallback.style.display = ''
-          }}
-        />
-      ) : null}
-      {!channel.thumbnail_url ? (
-        <div className="grid aspect-video w-full place-items-center bg-ink-800 text-ink-400">
-          <Radio className="size-6" aria-hidden />
-        </div>
-      ) : (
-        <div
-          className="grid aspect-video w-full place-items-center bg-ink-800 text-ink-400"
-          style={{ display: 'none' }}
-        >
-          <Radio className="size-6" aria-hidden />
-        </div>
-      )}
+      {/*
+        thumbnail_url and avatar_url are always non-null proxy paths, and the
+        backend serves its own placeholder artwork when Twitch's CDN fails - so
+        there is no "missing url" branch to render here.
+      */}
+      <img
+        src={channel.thumbnail_url}
+        alt=""
+        className="aspect-video w-full bg-ink-800 object-cover"
+        loading="lazy"
+      />
       <div className="space-y-2 p-3.5">
         <div className="flex items-center gap-2">
-          {channel.avatar_url && (
-            <img
-              src={channel.avatar_url}
-              alt=""
-              className="size-6 rounded-full"
-              loading="lazy"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none'
-              }}
-            />
-          )}
+          <img
+            src={channel.avatar_url}
+            alt=""
+            className="size-6 rounded-full bg-ink-700"
+            loading="lazy"
+          />
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-white">
             {channel.display_name}
           </span>

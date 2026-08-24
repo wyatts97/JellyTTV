@@ -22,6 +22,7 @@ FUNCTIONS = [
     tasks.poll_live,
     tasks.handle_stream_online,
     tasks.handle_stream_offline,
+    tasks.notify_live,
     tasks.sync_vods,
     tasks.sync_all_vods,
     tasks.download_vod,

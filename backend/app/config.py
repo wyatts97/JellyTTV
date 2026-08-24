@@ -40,7 +40,17 @@ class AppConfig(BaseSettings):
 
     # How long a resolved upstream HLS playlist url is reused before we ask
     # streamlink again. Twitch tokens outlive this comfortably.
+    #
+    # This short TTL exists only to stop unrelated callers respawning streamlink;
+    # live playback does NOT use it. A stream session pins the url it resolved
+    # and keeps it until upstream actually fails, because re-resolving hands back
+    # a different video-weaver host whose segment numbering does not line up with
+    # what the player has already buffered.
     resolver_cache_seconds: int = 20
+    resolver_session_ttl_seconds: int = 3600
+
+    # Idle time before an inactive stream session is discarded.
+    stream_session_idle_seconds: int = 90
 
     # Guide window (hours) rendered into the XMLTV output.
     guide_window_hours: int = 48

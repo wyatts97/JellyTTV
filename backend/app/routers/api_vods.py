@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_db
 from app.models import Channel, Vod, VodMode, VodState
-from app.ratelimit import limiter
 from app.schemas import VodOut
 from app.security import AdminUser
+from app.services import images
 from app.services import vods as vod_service
 from app.util import utcnow
 from app.worker.queue import enqueue
@@ -139,29 +138,29 @@ async def skip(
 
 
 @router.get("/{vod_id}/thumbnail", response_class=Response)
-@limiter.limit("60/minute")
 async def vod_thumbnail(
-    request: Request,
     vod_id: int,
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
+    """VOD artwork, cached and served through the shared client.
+
+    Like the channel artwork endpoints, this is deliberately not rate limited:
+    one VOD list renders dozens of these at once, and 429s show up as broken
+    images rather than as anything a user could diagnose.
+    """
     vod = await session.get(Vod, vod_id)
     if vod is None:
         raise HTTPException(status_code=404, detail="VOD not found")
-    if not vod.thumbnail_url:
-        raise HTTPException(status_code=404, detail="No thumbnail available")
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(vod.thumbnail_url)
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream thumbnail returned {exc.response.status_code}") from None
-    except httpx.HTTPError:
-        raise HTTPException(status_code=502, detail="failed to fetch thumbnail") from None
+    entry = await images.get_image(
+        f"vod:{vod_id}", vod.thumbnail_url, ttl=images.AVATAR_TTL
+    )
+    if entry is None:
+        content, media_type = images.placeholder_preview(vod.title or "")
+        return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=60"})
 
     return Response(
-        content=resp.content,
-        media_type=resp.headers.get("content-type", "image/jpeg"),
+        content=entry.content,
+        media_type=entry.content_type,
         headers={"Cache-Control": "max-age=300"},
     )

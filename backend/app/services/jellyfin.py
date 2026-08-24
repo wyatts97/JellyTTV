@@ -201,6 +201,27 @@ class JellyfinClient:
             )
         log.info("triggered jellyfin guide refresh")
 
+    async def send_notification(
+        self, *, title: str, body: str, subtitle: str | None = None
+    ) -> None:
+        """Push a notification to Streamyfin clients.
+
+        Delivered through the Streamyfin companion plugin's custom-webhook
+        endpoint, which authenticates with the same admin API key we already
+        hold. Jellyfin's own web PWA has no Web Push support at all - its service
+        worker only does offline caching - so this plugin is the one route to a
+        real push notification on a phone or tablet.
+
+        Raises `JellyfinError` with `status=404` when the plugin is not
+        installed, which callers should treat as "not configured", not "broken".
+        """
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if subtitle:
+            payload["subtitle"] = subtitle
+        # The endpoint takes an array of notifications.
+        await self._request("POST", "/Streamyfin/notification", json_body=[payload])
+        log.info("sent streamyfin notification", title=title)
+
     async def refresh(self, *, library_id: str | None = None) -> str:
         """Refresh as narrowly as possible; returns what was actually done."""
         if library_id:

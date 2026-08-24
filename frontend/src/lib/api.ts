@@ -88,6 +88,7 @@ export const api = {
     return request<JellyfinLibrary[]>(`/api/jellyfin/libraries?${params}`)
   },
   refreshJellyfin: () => post<{ queued: boolean }>('/api/jellyfin/refresh'),
+  testNotification: () => post<ConnectionTest>('/api/notifications/test'),
   reconcileEventsub: () => post<{ queued: boolean }>('/api/eventsub/reconcile'),
   eventsubStatus: () => request<Record<string, unknown>>('/api/eventsub/status'),
 

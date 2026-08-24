@@ -17,11 +17,20 @@ from sqlmodel import select
 from app.config import get_config
 from app.db import session_scope
 from app.logging_conf import get_logger
-from app.models import Channel, EventLog, Job, JobState, Vod, VodMode, VodState
+from app.models import (
+    Channel,
+    EventLog,
+    Job,
+    JobState,
+    StreamSession,
+    Vod,
+    VodMode,
+    VodState,
+)
 from app.services import channels as channel_service
 from app.services import events as event_bus
 from app.services import eventsub as eventsub_service
-from app.services import library, vods
+from app.services import library, notifications, vods
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings
 from app.util import utcnow
@@ -122,6 +131,50 @@ async def prune_eventsub_messages(ctx: dict[str, Any]) -> int:
 
 
 # -------------------------------------------------------------------- live state
+async def _current_stream_id(session, channel_id: int | None) -> str | None:
+    """The Twitch id of the broadcast currently running on this channel."""
+    if not channel_id:
+        return None
+    row = (
+        await session.exec(
+            select(StreamSession)
+            .where(StreamSession.channel_id == channel_id)
+            .where(StreamSession.is_live == True)  # noqa: E712 - SQL, not Python
+            .order_by(StreamSession.started_at.desc())
+        )
+    ).first()
+    return row.twitch_stream_id if row else None
+
+
+async def _enqueue_live_notification(channel_id: int, stream_id: str | None) -> None:
+    """Queue one go-live push, deduped per broadcast.
+
+    EventSub and the two-minute polling fallback both detect the same go-live,
+    so the job id is keyed on the Twitch stream id: whichever path gets there
+    first wins and the other is dropped by arq.
+    """
+    key = stream_id or f"channel-{channel_id}"
+    await enqueue("notify_live", channel_id, job_id=f"notify_live:{key}", defer_seconds=5)
+
+
+async def notify_live(ctx: dict[str, Any], channel_id: int) -> dict[str, Any]:
+    async with session_scope() as session:
+        settings = await get_settings(session)
+        channel = await session.get(Channel, channel_id)
+        if channel is None or not channel.is_live:
+            return {"sent": False, "reason": "not live"}
+        if not settings.row.notify_on_live:
+            return {"sent": False, "reason": "disabled"}
+        try:
+            sent = await notifications.notify_live(settings, channel)
+        except notifications.NotificationError as exc:
+            log.warning(
+                "go-live notification failed", login=channel.twitch_login, error=str(exc)
+            )
+            return {"sent": False, "reason": str(exc)}
+    return {"sent": sent, "login": channel.twitch_login}
+
+
 async def poll_live(ctx: dict[str, Any]) -> dict[str, bool]:
     """Polling fallback / safety net for go-live detection."""
     async with session_scope() as session:
@@ -137,6 +190,14 @@ async def poll_live(ctx: dict[str, Any]) -> dict[str, bool]:
     for login, is_live in changed.items():
         await event_bus.publish("channel.live" if is_live else "channel.offline", {"login": login})
         await _log_event("live", f"{login} went {'live' if is_live else 'offline'}")
+        if is_live:
+            async with session_scope() as session:
+                channel = await channel_service.get_channel_by_login(session, login)
+                stream_id = (
+                    await _current_stream_id(session, channel.id) if channel else None
+                )
+            if channel:
+                await _enqueue_live_notification(channel.id, stream_id)
         if not is_live:
             async with session_scope() as session:
                 channel = await channel_service.get_channel_by_login(session, login)
@@ -164,9 +225,16 @@ async def handle_stream_online(ctx: dict[str, Any], channel_id: int) -> None:
         channel = await session.get(Channel, channel_id)
         if channel is None:
             return
-        await channel_service.poll_live_state(session, settings, [channel])
+        # Keep the transition result: without it this job cannot tell a genuine
+        # go-live from a redundant EventSub delivery, and would notify twice.
+        changed = await channel_service.poll_live_state(session, settings, [channel])
+        went_live = changed.get(channel.twitch_login) is True
+        stream_id = await _current_stream_id(session, channel_id)
+
     await event_bus.publish("channels.changed", {})
     await enqueue("jellyfin_refresh_guide", job_id="jellyfin_refresh_guide", defer_seconds=5)
+    if went_live:
+        await _enqueue_live_notification(channel_id, stream_id)
 
 
 async def handle_stream_offline(ctx: dict[str, Any], channel_id: int) -> None:

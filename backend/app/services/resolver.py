@@ -102,11 +102,13 @@ async def binary_versions() -> dict[str, str | None]:
 
 
 def _streamlink_cmd(url: str, quality: str, user_token: str | None) -> list[str]:
+    # No `--twitch-low-latency` here: it only changes streamlink's own buffering
+    # and prefetch behaviour during playback, and `--stream-url` makes streamlink
+    # print a url and exit. It never affected the playlist we were handed.
     cmd = [
         STREAMLINK_BIN,
         "--stream-url",
         "--quiet",
-        "--twitch-low-latency",
         # Ad-solution headers that make Twitch serve fewer stitched ads.
         "--http-header",
         "X-Device-Id=twitch-web-wall-mason",
@@ -167,35 +169,61 @@ async def _resolve(url: str, quality: str, user_token: str | None) -> str:
 
 
 async def _resolve_cached(
-    cache_key: str, url: str, quality: str, user_token: str | None, ttl: float
+    cache_key: str,
+    url: str,
+    quality: str,
+    user_token: str | None,
+    ttl: float,
+    *,
+    force: bool = False,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
-    if entry and entry.expires_at > now:
+    if entry and entry.expires_at > now and not force:
         return entry.url
 
     async with _lock_for(cache_key):
         entry = _cache.get(cache_key)
         now = time.time()
-        if entry and entry.expires_at > now:
+        if entry and entry.expires_at > now and not force:
             return entry.url
         resolved = await _resolve(url, quality, user_token)
         _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
         return resolved
 
 
+def live_cache_key(login: str, quality: str = "best") -> str:
+    return f"live:{login}:{quality}"
+
+
+def invalidate_live(login: str, quality: str = "best") -> None:
+    invalidate(live_cache_key(login, quality))
+
+
 async def resolve_live(
-    login: str, *, quality: str = "best", user_token: str | None = None
+    login: str,
+    *,
+    quality: str = "best",
+    user_token: str | None = None,
+    ttl: float | None = None,
+    force: bool = False,
 ) -> str:
-    """Return the upstream media-playlist url for a live channel."""
+    """Return the upstream media-playlist url for a live channel.
+
+    `ttl` defaults to the long session TTL rather than `resolver_cache_seconds`:
+    a stream session pins the url it was given and only asks for a new one when
+    upstream actually breaks, so the cache is a warm-start aid, not the thing
+    keeping streamlink from being respawned. `force=True` bypasses the cache and
+    is used by that failure path.
+    """
     cfg = get_config()
-    key = f"live:{login}:{quality}"
     return await _resolve_cached(
-        key,
+        live_cache_key(login, quality),
         f"https://www.twitch.tv/{login}",
         quality,
         user_token,
-        float(cfg.resolver_cache_seconds),
+        float(ttl if ttl is not None else cfg.resolver_session_ttl_seconds),
+        force=force,
     )
 
 

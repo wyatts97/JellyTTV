@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import base64
 from typing import Annotated
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -12,11 +10,10 @@ from app.config import get_config
 from app.db import get_db
 from app.logging_conf import get_logger
 from app.models import Channel, EventLog, EventSubSubscription, StreamSession, Vod, VodMode
-from app.ratelimit import limiter
 from app.schemas import ChannelCreate, ChannelOut, ChannelUpdate, VodOut
 from app.security import AdminUser
 from app.services import channels as channel_service
-from app.services import library, vods
+from app.services import images, library, vods
 from app.services.channels import ChannelError
 from app.services.settings_store import ResolvedSettings, get_settings
 from app.util import sanitize_filename, twitch_thumbnail, utcnow
@@ -25,12 +22,6 @@ from app.worker.queue import enqueue
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
-
-# 1x1 transparent PNG, served when an avatar is missing/unreachable so the
-# frontend never has to render a browser's native broken-image icon.
-_BLANK_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
-)
 
 
 def _to_out(channel: Channel, settings: ResolvedSettings, counts: dict[str, int]) -> ChannelOut:
@@ -256,28 +247,17 @@ async def preview_paths(
     }
 
 
-async def _fetch_image(url: str) -> httpx.Response | None:
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-    except httpx.HTTPError:
-        return None
-    return resp
-
-
 @router.get("/{channel_id}/thumbnail", response_class=Response)
-@limiter.limit("60/minute")
 async def channel_thumbnail(
-    request: Request,
     channel_id: int,
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     """Live preview for a channel, falling back to the avatar.
 
-    Never returns a broken image: if the live preview is missing or Twitch's CDN
-    refuses it, serve the streamer's avatar with a 200 instead. Callers render
-    the result directly, so a 404/502 here would surface as a broken card.
+    Cached server-side, so a dashboard full of cards costs Twitch one fetch per
+    channel per minute rather than one per render. There is deliberately no rate
+    limit: the old 60/minute cap was reached by a single dashboard refresh with a
+    handful of channels, and the 429s rendered as broken images.
     """
     channel = await channel_service.get_channel(session, channel_id)
     if channel is None:
@@ -286,55 +266,48 @@ async def channel_thumbnail(
     # Re-normalise on read: rows written before the placeholder fix still hold a
     # literal `-{width}x{height}.jpg`, and this repairs them transparently.
     url = twitch_thumbnail(channel.live_thumbnail_url)
-    resp = await _fetch_image(url) if url else None
+    entry = await images.get_image(f"preview:{channel_id}", url, ttl=images.PREVIEW_TTL)
 
-    if resp is None:
-        if url:
-            log.debug(
-                "live thumbnail unavailable, falling back to avatar",
-                login=channel.twitch_login,
-                url=url,
-            )
-        if not channel.avatar_url:
-            raise HTTPException(status_code=404, detail="No thumbnail or avatar available")
-        resp = await _fetch_image(channel.avatar_url)
-        if resp is None:
-            raise HTTPException(status_code=502, detail="failed to fetch thumbnail or avatar")
+    if entry is None and channel.avatar_url:
+        entry = await images.get_image(
+            f"avatar:{channel_id}", channel.avatar_url, ttl=images.AVATAR_TTL
+        )
+
+    if entry is None:
+        content, media_type = images.placeholder_preview(channel.display_name)
+        return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=30"})
 
     return Response(
-        content=resp.content,
-        media_type=resp.headers.get("content-type", "image/jpeg"),
+        content=entry.content,
+        media_type=entry.content_type,
         headers={"Cache-Control": "max-age=30"},
     )
 
 
 @router.get("/{channel_id}/avatar", response_class=Response)
-@limiter.limit("60/minute")
 async def channel_avatar(
-    request: Request,
     channel_id: int,
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
-    """Streamer avatar.
+    """Streamer avatar, cached server-side.
 
-    Never returns a broken image: a missing or unreachable avatar serves a
-    blank 1x1 PNG with a 200 instead, so the small avatar next to the
-    streamer name never renders a browser's native broken-image icon.
+    On failure this serves a visible initial-letter placeholder rather than the
+    1x1 transparent PNG it used to: an invisible "success" is what made broken
+    avatars look like a frontend bug and kept them out of the logs.
     """
     channel = await channel_service.get_channel(session, channel_id)
     if channel is None:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    resp = await _fetch_image(channel.avatar_url) if channel.avatar_url else None
-    if resp is None:
-        return Response(
-            content=_BLANK_PNG,
-            media_type="image/png",
-            headers={"Cache-Control": "max-age=30"},
-        )
+    entry = await images.get_image(
+        f"avatar:{channel_id}", channel.avatar_url, ttl=images.AVATAR_TTL
+    )
+    if entry is None:
+        content, media_type = images.placeholder_avatar(channel.display_name)
+        return Response(content, media_type=media_type, headers={"Cache-Control": "max-age=60"})
 
     return Response(
-        content=resp.content,
-        media_type=resp.headers.get("content-type", "image/jpeg"),
+        content=entry.content,
+        media_type=entry.content_type,
         headers={"Cache-Control": "max-age=300"},
     )

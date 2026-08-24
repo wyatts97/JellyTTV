@@ -70,6 +70,12 @@ class Settings(SQLModel, table=True):
     jellyfin_shows_library_id: str | None = None
     jellyfin_auto_refresh: bool = True
 
+    # Go-live push notifications, delivered via the Streamyfin companion plugin
+    # (Jellyfin's own web PWA cannot receive push at all).
+    notify_on_live: bool = False
+    notify_title_template: str = "{display_name} is live"
+    notify_body_template: str = "{title}"
+
     # Base url of THIS service as reachable from the Jellyfin server.
     # Used inside .strm files and for the M3U/XMLTV urls shown in the UI.
     # e.g. http://jellyttv:8730 or http://192.168.1.10:8730

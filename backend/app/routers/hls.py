@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 from typing import Annotated
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -26,7 +27,9 @@ from app.db import get_db
 from app.logging_conf import get_logger
 from app.security import require_tuner_token
 from app.services import channels as channel_service
-from app.services import hls, resolver
+from app.services import hls, resolver, stream_session
+from app.services import http as shared_http
+from app.services.http import UPSTREAM_HEADERS
 from app.services.settings_store import ResolvedSettings, get_settings
 
 log = get_logger(__name__)
@@ -34,15 +37,6 @@ router = APIRouter(tags=["stream"], dependencies=[Depends(require_tuner_token)])
 
 PLAYLIST_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
-
-UPSTREAM_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://player.twitch.tv",
-    "Origin": "https://player.twitch.tv",
-}
 
 ALLOWED_UPSTREAM_SUFFIXES = (
     ".ttvnw.net",
@@ -86,42 +80,84 @@ def _base_from_request(request: Request, settings: ResolvedSettings) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
+async def _fetch_playlist(url: str) -> tuple[int, str]:
+    """Fetch a playlist, reporting transport failures as status 0.
+
+    The session decides what a given status means - a 403 means the weaver url
+    is dead and must be re-resolved, a 502 is worth retrying against the same
+    url - so this must not collapse everything into one exception.
+    """
+    try:
+        response = await shared_http.get_client().get(url, headers=UPSTREAM_HEADERS)
+    except httpx.HTTPError as exc:
+        log.debug("upstream playlist transport error", url=url, error=str(exc))
+        return 0, ""
+    return response.status_code, response.text
+
+
 async def _fetch_text(url: str) -> str:
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        try:
-            response = await client.get(url, headers=UPSTREAM_HEADERS)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"upstream playlist error: {exc}") from exc
-    if response.status_code != 200:
+    """Strict single-shot fetch, for callers with no session to fall back on."""
+    status_code, text = await _fetch_playlist(url)
+    if status_code != 200:
         raise HTTPException(
-            status_code=502, detail=f"upstream playlist returned {response.status_code}"
+            status_code=502, detail=f"upstream playlist returned {status_code}"
         )
-    return response.text
+    return text
 
 
-async def _resolve_channel(
+async def _channel_quality(
     session: AsyncSession, settings: ResolvedSettings, login: str
-) -> tuple[str, str]:
+) -> str:
+    """Validate the channel is tracked and playable, returning its quality."""
     channel = await channel_service.get_channel_by_login(session, login)
     if channel is None:
         raise HTTPException(status_code=404, detail=f"channel {login} is not tracked")
     if not channel.enabled or not channel.live_enabled:
         raise HTTPException(status_code=409, detail=f"{channel.display_name} is disabled")
-    try:
-        upstream = await resolver.resolve_live(
-            channel.twitch_login,
-            quality=channel.quality or settings.row.default_quality,
-            user_token=settings.twitch_user_token,
-        )
-    except resolver.ChannelOffline as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"{channel.display_name} is offline",
-        ) from exc
-    except resolver.ResolveError as exc:
-        log.warning("stream resolve failed", login=login, error=str(exc))
-        raise HTTPException(status_code=502, detail=f"could not resolve stream: {exc}") from exc
-    return upstream, channel.quality or "best"
+    return channel.quality or settings.row.default_quality or "best"
+
+
+def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
+    """Build the callable a stream session uses to (re)acquire an upstream url.
+
+    Passed in rather than called up front so the session controls *when* a new
+    weaver url is fetched: re-resolving mid-playback hands back a different host
+    whose numbering does not line up with what the player already buffered.
+    """
+    calls = {"n": 0}
+
+    async def resolve() -> str:
+        calls["n"] += 1
+        try:
+            return await resolver.resolve_live(
+                login,
+                quality=quality,
+                user_token=settings.twitch_user_token,
+                # The first resolve of a session may use the cache; every
+                # subsequent one is a recovery attempt and must be fresh.
+                force=calls["n"] > 1,
+            )
+        except resolver.ChannelOffline as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"{login} is offline",
+            ) from exc
+        except resolver.ResolveError as exc:
+            log.warning("stream resolve failed", login=login, error=str(exc))
+            raise HTTPException(
+                status_code=502, detail=f"could not resolve stream: {exc}"
+            ) from exc
+
+    return resolve
+
+
+async def _resolve_channel(
+    session: AsyncSession, settings: ResolvedSettings, login: str
+) -> tuple[str, str]:
+    """Resolve immediately. Only for the non-session paths (redirect mode, VODs)."""
+    quality = await _channel_quality(session, settings, login)
+    upstream = await _make_resolver(login, quality, settings)()
+    return upstream, quality
 
 
 def _segment_rewriter(base: str, login: str, key_suffix: str, proxy_segments: bool):
@@ -141,34 +177,86 @@ async def master_playlist(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     settings = await get_settings(session)
-    upstream, _quality = await _resolve_channel(session, settings, login)
+    quality = await _channel_quality(session, settings, login)
+    resolve = _make_resolver(login, quality, settings)
 
     if not settings.row.proxy_enabled:
         # Redirect-only mode: cheapest, but no ad stripping.
-        return RedirectResponse(upstream, status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(await resolve(), status_code=status.HTTP_302_FOUND)
 
     base = _base_from_request(request, settings)
     key_suffix = _key_suffix(request)
-    playlist = await _fetch_text(upstream)
 
-    if hls.is_master_playlist(playlist):
-        def to_media(variant_url: str) -> str:
-            return (
-                f"{base}/hls/{quote(login)}/media.m3u8?u={encode_url(variant_url)}{key_suffix}"
-            )
+    # streamlink hands back a single variant, so this endpoint almost always
+    # serves a *media* playlist despite its name. Check once per session and
+    # remember, rather than re-fetching to re-decide on every poll.
+    existing = stream_session.get(login, quality)
+    if existing is None or existing.is_master is None:
+        upstream = await resolve()
+        probe = await _fetch_text(upstream)
+        if hls.is_master_playlist(probe):
+            def to_media(variant_url: str) -> str:
+                return (
+                    f"{base}/hls/{quote(login)}/media.m3u8"
+                    f"?u={encode_url(variant_url)}{key_suffix}"
+                )
 
-        result = hls.rewrite_master(playlist, upstream, rewrite_uri=to_media)
-        return Response(result.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
+            result = hls.rewrite_master(probe, upstream, rewrite_uri=to_media)
+            return Response(result.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
 
-    # streamlink usually hands us a media playlist directly - serve it as-is.
-    result = hls.rewrite_playlist(
-        playlist,
-        upstream,
-        strip_ads=settings.row.strip_ads,
-        rewrite_uri=_segment_rewriter(base, login, key_suffix, settings.row.proxy_segments),
+    return await _session_playlist(
+        login=login,
+        quality=quality,
+        settings=settings,
+        base=base,
+        key_suffix=key_suffix,
+        resolve=resolve,
     )
-    _log_strip(login, result)
-    return Response(result.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
+
+
+async def _session_playlist(
+    *,
+    login: str,
+    quality: str,
+    settings: ResolvedSettings,
+    base: str,
+    key_suffix: str,
+    resolve,
+    variant: str | None = None,
+) -> Response:
+    """Serve a media playlist through the stateful session."""
+    try:
+        render = await stream_session.get_playlist(
+            login=login,
+            quality=quality,
+            strip_ads=settings.row.strip_ads,
+            resolve=resolve,
+            fetch=_fetch_playlist,
+            rewrite_uri=_segment_rewriter(
+                base, login, key_suffix, settings.row.proxy_segments
+            ),
+            variant=variant,
+        )
+    except stream_session.SessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+            headers={"Retry-After": "2"},
+        ) from exc
+
+    sess = stream_session.get(login, quality, variant)
+    if sess is not None:
+        sess.is_master = False
+
+    if render.removed_segments:
+        log.info(
+            "stripped twitch ad segments",
+            login=login,
+            segments=render.removed_segments,
+            media_sequence=render.media_sequence,
+            discontinuity_sequence=render.discontinuity_sequence,
+        )
+    return Response(render.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
 
 
 @router.api_route("/hls/{login}/media.m3u8", methods=["GET", "HEAD"], include_in_schema=False)
@@ -179,24 +267,29 @@ async def media_playlist(
     u: Annotated[str | None, Query(description="Opaque upstream playlist reference")] = None,
 ) -> Response:
     settings = await get_settings(session)
+    quality = await _channel_quality(session, settings, login)
 
     if u:
-        upstream = decode_url(u)
+        # A pinned variant of a real master playlist. It gets its own session so
+        # each variant keeps a separate sequence space.
+        pinned = decode_url(u)
+        variant = hashlib.sha1(u.encode()).hexdigest()[:12]
+
+        async def resolve() -> str:
+            return pinned
     else:
-        upstream, _quality = await _resolve_channel(session, settings, login)
+        variant = None
+        resolve = _make_resolver(login, quality, settings)
 
-    base = _base_from_request(request, settings)
-    key_suffix = _key_suffix(request)
-    playlist = await _fetch_text(upstream)
-
-    result = hls.rewrite_playlist(
-        playlist,
-        upstream,
-        strip_ads=settings.row.strip_ads,
-        rewrite_uri=_segment_rewriter(base, login, key_suffix, settings.row.proxy_segments),
+    return await _session_playlist(
+        login=login,
+        quality=quality,
+        settings=settings,
+        base=_base_from_request(request, settings),
+        key_suffix=_key_suffix(request),
+        resolve=resolve,
+        variant=variant,
     )
-    _log_strip(login, result)
-    return Response(result.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
 
 
 @router.api_route("/hls/{login}/seg", methods=["GET", "HEAD"], include_in_schema=False)
@@ -211,27 +304,31 @@ async def segment(
     if not settings.row.proxy_segments:
         return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0), follow_redirects=True)
+    # A client pulling segments is alive even if a playlist poll runs late.
+    stream_session.touch(login, settings.row.default_quality or "best")
+
+    client = shared_http.get_client()
     try:
-        upstream_request = client.build_request("GET", url, headers=UPSTREAM_HEADERS)
+        upstream_request = client.build_request(
+            "GET", url, headers=UPSTREAM_HEADERS, timeout=shared_http.SEGMENT_TIMEOUT
+        )
         response = await client.send(upstream_request, stream=True)
     except httpx.HTTPError as exc:
-        await client.aclose()
         raise HTTPException(status_code=502, detail=f"segment fetch failed: {exc}") from exc
 
     if response.status_code >= 400:
         code = response.status_code
         await response.aclose()
-        await client.aclose()
         raise HTTPException(status_code=502, detail=f"segment upstream returned {code}")
 
     async def body():
+        # Only the response is closed here: the client is shared and long-lived,
+        # so closing it would tear down the connection pool for everyone.
         try:
             async for chunk in response.aiter_bytes(65536):
                 yield chunk
         finally:
             await response.aclose()
-            await client.aclose()
 
     return StreamingResponse(
         body(),
@@ -260,13 +357,3 @@ async def vod_stream(
             detail=f"could not resolve VOD {video_id}: {exc}",
         ) from exc
     return RedirectResponse(upstream, status_code=status.HTTP_302_FOUND)
-
-
-def _log_strip(login: str, result: hls.PlaylistResult) -> None:
-    if result.removed_segments:
-        log.info(
-            "stripped twitch ad segments",
-            login=login,
-            segments=result.removed_segments,
-            seconds=result.removed_seconds,
-        )

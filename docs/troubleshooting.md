@@ -49,6 +49,34 @@ Common causes: outdated streamlink/yt-dlp after a Twitch backend change (`docker
 docker compose up -d`), subscriber-only content (add a user OAuth token in Settings), or the host
 being geo/IP-blocked by Twitch.
 
+## A channel stutters, pauses, or dies after a few minutes
+
+Almost always a playlist-continuity problem, and it only shows up on channels
+that actually run stitched ads or get moved between Twitch's `video-weaver`
+nodes — which is why one channel can be perfect while another is unwatchable.
+
+Start with the HLS debug endpoint (admin session required, not the tuner key):
+
+```bash
+curl -s "http://localhost:8730/api/debug/hls/SOMELOGIN?fmt=text"
+```
+
+It prints the raw upstream playlist and the playlist JellyTTV hands to Jellyfin
+side by side, plus per-segment detail. What to look for:
+
+| Field | Meaning |
+|---|---|
+| `AD[daterange]` on most/all segments | Ad detection is over-matching. If the playlist would be emptied, JellyTTV passes it through instead and logs `ad strip would empty the playlist` — you get ads, not a crash. |
+| `low latency: True` with `dropped=` | Twitch sent LL-HLS tags. These are dropped deliberately; their URIs are relative to the upstream host and would break any client that followed them. |
+| `session` → `media_sequence` | Must only ever increase. Poll a few times; if it moves backwards, that is a bug worth reporting. |
+| `upstream mseq` vs session `media_sequence` | They are unrelated by design. JellyTTV assigns its own sequence numbers so ad removal and weaver switches stay invisible to the player. |
+
+`GET /api/debug/hls/sessions` lists every active session with its sequence
+bookkeeping and how many times it has had to re-resolve. A steadily climbing
+`resolves` count means Twitch keeps dropping the upstream.
+
+Add `?refresh=1` to force a fresh streamlink resolve and start a new session.
+
 ## Ads still play
 
 - Ad stripping only works with **Settings → Proxy playlists through JellyTTV** enabled.

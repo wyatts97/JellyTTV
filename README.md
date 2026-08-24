@@ -17,6 +17,11 @@ channels** (with a real EPG), and past broadcasts as **episodes** of a per-chann
   between zero-storage `.strm` links or full yt-dlp archiving with retention rules.
 - **Instant go-live** — Twitch EventSub webhooks when you have public HTTPS, automatic polling
   fallback when you don't.
+- **Go-live push notifications** — optional push to your phone or tablet when a tracked channel
+  starts streaming, delivered through the
+  [Streamyfin companion plugin](https://github.com/streamyfin/jellyfin-plugin-streamyfin) using the
+  Jellyfin API key you already configured. (Jellyfin's own web app cannot receive push notifications
+  — its service worker only does offline caching — so a client that supports them is required.)
 - **One-command install** — Docker Compose, a setup wizard, and a React dashboard for everything.
 
 > **Use responsibly.** JellyTTV is for personal use with content you are entitled to access. You

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, KeyRound, RefreshCw, RotateCcw, Save, Zap } from 'lucide-react'
+import { AlertTriangle, Bell, KeyRound, RefreshCw, RotateCcw, Save, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, ApiError, VOD_MODE_LABELS } from '@/lib/api'
 import type { JellyfinLibrary, Settings as SettingsData, VodMode } from '@/lib/types'
@@ -80,6 +80,12 @@ export default function Settings() {
   const reconcile = useMutation({
     mutationFn: api.reconcileEventsub,
     onSuccess: () => toast.success('EventSub reconcile queued'),
+    onError: (error: ApiError) => toast.error(error.message),
+  })
+
+  const testNotify = useMutation({
+    mutationFn: api.testNotification,
+    onSuccess: (r) => (r.ok ? toast.success(r.message) : toast.error(r.message)),
     onError: (error: ApiError) => toast.error(error.message),
   })
 
@@ -307,6 +313,51 @@ export default function Settings() {
                 : 'Set a public https:// URL above to enable this.'
             }
           />
+        </CardBody>
+      </Card>
+
+      {/* ------------------------------------------------- Notifications */}
+      <Card>
+        <CardHeader
+          title="Go-live notifications"
+          description="Push a notification when a tracked channel starts streaming."
+          action={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => testNotify.mutate()}
+              loading={testNotify.isPending}
+            >
+              <Bell className="size-3.5" /> Send test
+            </Button>
+          }
+        />
+        <CardBody className="space-y-4">
+          <Toggle
+            checked={Boolean(get('notify_on_live'))}
+            onChange={(v) => set('notify_on_live', v)}
+            label="Notify when a channel goes live"
+            description="Delivered through the Streamyfin companion plugin on your Jellyfin server. Jellyfin's own web app cannot receive push notifications."
+          />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Title"
+              hint="Placeholders: {display_name} {login} {title} {game} {viewers}"
+            >
+              <Input
+                placeholder="{display_name} is live"
+                value={String(get('notify_title_template') ?? '')}
+                onChange={(e) => set('notify_title_template', e.target.value)}
+              />
+            </Field>
+            <Field label="Body" hint="Falls back to the category if this renders empty.">
+              <Input
+                placeholder="{title}"
+                value={String(get('notify_body_template') ?? '')}
+                onChange={(e) => set('notify_body_template', e.target.value)}
+              />
+            </Field>
+          </div>
         </CardBody>
       </Card>
 

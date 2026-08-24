@@ -11,6 +11,7 @@ from app.logging_conf import get_logger
 from app.schemas import ConnectionTest, JellyfinLibraryOut, SettingsOut, SettingsUpdate, settings_out
 from app.security import AdminUser
 from app.services import eventsub as eventsub_service
+from app.services import notifications
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings, get_settings_row, update_settings
 from app.services.twitch import TwitchClient, TwitchError
@@ -153,6 +154,32 @@ async def jellyfin_libraries(
         )
         for lib in libraries
     ]
+
+
+@router.post("/notifications/test", response_model=ConnectionTest)
+async def test_notification(
+    _user: AdminUser,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> ConnectionTest:
+    """Send a test push through the Streamyfin plugin."""
+    settings = await get_settings(session)
+    try:
+        await notifications.send(
+            settings,
+            "JellyTTV test",
+            "Go-live notifications are working.",
+        )
+    except notifications.PluginMissing as exc:
+        return ConnectionTest(
+            ok=False,
+            message=(
+                f"{exc}. Install the Streamyfin companion plugin on your Jellyfin "
+                "server to receive push notifications."
+            ),
+        )
+    except notifications.NotificationError as exc:
+        return ConnectionTest(ok=False, message=str(exc))
+    return ConnectionTest(ok=True, message="Test notification sent")
 
 
 @router.post("/jellyfin/refresh")

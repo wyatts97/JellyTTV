@@ -31,6 +31,9 @@ export interface Settings {
   jellyfin_api_key_set: boolean
   jellyfin_shows_library_id: string | null
   jellyfin_auto_refresh: boolean
+  notify_on_live: boolean
+  notify_title_template: string
+  notify_body_template: string
   tuner_token: string | null
   tuner_include_offline: boolean
   proxy_enabled: boolean
@@ -126,8 +129,11 @@ export interface LiveChannel {
   game: string | null
   viewers: number | null
   started_at: string | null
-  thumbnail_url: string | null
-  avatar_url: string | null
+  // Always a proxy path on our own origin (/api/channels/{id}/...), never a
+  // Twitch CDN url and never null: the backend serves generated placeholder
+  // artwork rather than failing.
+  thumbnail_url: string
+  avatar_url: string
 }
 
 export interface Dashboard {
