@@ -27,15 +27,20 @@ YTDLP_BIN = "yt-dlp"
 # stitched in, the proxy can only choose between showing them and cutting a hole
 # in the stream.
 #
-# `frontpage` is the value streamlink's own Twitch docs name for this; the
-# trade-off they warn about is that a non-default player type can be denied the
-# highest quality renditions. `thunderdome` is community lore that has worked
-# historically but is not documented, so it is offered, not defaulted to.
-# `web` is Twitch's actual default and means "do not override" - the ad-bearing
-# path, kept as an escape hatch for when a stream will not resolve otherwise.
-DEFAULT_PLAYER_TYPE = "frontpage"
+# Not overriding is the default, deliberately. streamlink's own Twitch docs say
+# ads still get stitched into the playlist whichever player type you ask for,
+# and warn that a non-default one can be denied the highest quality renditions -
+# so an override costs resolution and buys no ad reduction. Their maintainer's
+# position is blunter still: nothing found so far removes ads for an
+# unauthenticated viewer, and the only reliable ad-free playlist comes from a
+# Turbo or subscribed account's OAuth token (`twitch_user_token`).
+#
+# The values stay configurable because this is undocumented Twitch behaviour
+# that people do report changing over time - but the default must not trade
+# picture quality for a benefit that is not there.
 PLAYER_TYPE_NONE = "web"
-PLAYER_TYPES = (DEFAULT_PLAYER_TYPE, "thunderdome", "embed", "autoplay", PLAYER_TYPE_NONE)
+DEFAULT_PLAYER_TYPE = PLAYER_TYPE_NONE
+PLAYER_TYPES = (PLAYER_TYPE_NONE, "frontpage", "thunderdome", "embed", "autoplay")
 
 
 def resolve_player_type(value: str | None) -> str:

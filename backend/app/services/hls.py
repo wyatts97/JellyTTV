@@ -41,16 +41,27 @@ AD_ATTR_PREFIX = "X-TV-TWITCH-AD-"
 # stream.
 _NON_AD_CLASSES = {"twitch-trigger", "twitch-stream-source", "twitch-info"}
 
-# Last-resort hint: Twitch sometimes labels ad segments in the EXTINF title.
-# Note the absence of a bare `amazon` alternative - it used to be there, and it
-# meant a stream titled "Amazon haul" lost every single segment.
-_AD_TITLE_RE = re.compile(r"(stitched-ad|twitch-ad|amazon\s+ad)", re.IGNORECASE)
+# Twitch labels ad segments in the EXTINF title, and Amazon serves the ads. This
+# is the original, deliberately loose rule, applied with no daterange required
+# first - it is what catches a pod joined after its DATERANGE scrolled out.
+#
+# It is known to over-match: segment titles here carry the *stream* title, so a
+# channel called "Amazon haul unboxing" has every segment classified as an ad,
+# and with the session holding output that would freeze the channel outright.
+# The heuristic is therefore revocable rather than merely narrow - see
+# `trust_titles` below and `stream_session`'s hold guard, which switches it off
+# for a session once it has demonstrably misfired. Detection stays aggressive;
+# the blast radius is bounded by making a bad call self-correcting.
+_AD_TITLE_RE = re.compile(r"(amazon|stitched-ad|twitch-ad)", re.IGNORECASE)
 
 # How much content a daterange that announces *no* duration is allowed to eat.
-# This was 240s, which is longer than the entire sliding window - a single
-# duration-less daterange therefore stripped the playlist down to nothing, and an
-# empty playlist is a fatal error for ffmpeg.
-_UNKNOWN_AD_WINDOW_SECONDS = 60.0
+# Back to the original 240s. It was cut to 60s because a duration-less daterange
+# could strip the playlist down to nothing and an empty playlist is fatal to
+# ffmpeg - but 60s is shorter than a real Twitch midroll, so every pod past a
+# minute stopped being recognised and played through at full quality. Overshoot
+# no longer empties anything: `stream_session` holds its existing window, and an
+# overlong hold is bounded by MAX_AD_HOLD_SECONDS there.
+_UNKNOWN_AD_WINDOW_SECONDS = 240.0
 
 # Low-latency / delta-update tags we deliberately drop. We serve a plain HLS
 # playlist, and these carry URIs relative to an upstream host the client cannot
@@ -198,6 +209,7 @@ def parse_media_playlist(
     strip_ads: bool = True,
     known_ad_ranges: Mapping[str, AdRange] | None = None,
     now: float = 0.0,
+    trust_titles: bool = True,
 ) -> ParsedPlaylist:
     """Parse a media playlist, marking (never dropping) stitched-ad segments.
 
@@ -205,6 +217,11 @@ def parse_media_playlist(
     daterange tag scrolls out of the sliding window well before the ad segments
     it describes do, so without this memory the same ad is classified one way on
     one poll and another way on the next, and the output keeps shifting.
+
+    `trust_titles=False` disables the EXTINF-title heuristic. A caller turns it
+    off once that heuristic has proven wrong for a channel - it matches the
+    stream title, not just ad markers, so a channel whose name mentions Amazon
+    would otherwise be classified as one unending commercial.
     """
     out = ParsedPlaylist()
     remembered = dict(known_ad_ranges or {})
@@ -350,9 +367,10 @@ def parse_media_playlist(
             ):
                 segment.is_ad = True
                 segment.ad_source = "session-range"
-            elif remembered and _AD_TITLE_RE.search(segment.title):
-                # Only trusted once a real ad daterange has been seen for this
-                # channel: cold, this heuristic causes total blackouts.
+            elif trust_titles and _AD_TITLE_RE.search(segment.title):
+                # Ungated: the marker is the only signal left once the DATERANGE
+                # has scrolled out. Revocable rather than gated - see the module
+                # comment on _AD_TITLE_RE.
                 segment.is_ad = True
                 segment.ad_source = "title"
 
@@ -366,21 +384,19 @@ def parse_media_playlist(
         pending_discontinuity = False
         have_extinf = False
 
-    # A duration-less ad window must not swallow the live edge: if we are still
-    # inside one when the playlist ends, give the final segment back. An explicit
-    # discontinuity would have closed the window properly.
+    # No tail un-marking here, deliberately. This used to hand the final segment
+    # of a duration-less ad window back to the player "so the live edge is not
+    # swallowed", which meant one segment of the commercial was emitted on every
+    # single poll - at a ~2s cadence that is a continuous drip of ad video for
+    # the whole break, and it is what viewers saw as the commercial slate. It
+    # also quietly defeated `stream_session`'s hold behaviour, because the kept
+    # set was then never empty.
     #
-    # Only when *nothing* else survived, though. Handing the tail back on every
-    # poll leaks a segment of the commercial into the stream for the whole pod,
-    # which is the ad screen users actually see. As a last-resort valve against
-    # an empty playlist it is worth it; as a routine concession it is not.
-    if in_ad and not ad_known_duration and out.segments:
-        if not any(not s.is_ad for s in out.segments):
-            tail = out.segments[-1]
-            if tail.is_ad and tail.ad_source == "daterange":
-                tail.is_ad = False
-                tail.ad_source = None
-
+    # It existed only to avoid rendering an empty playlist, and nothing depends
+    # on it for that any more: `stream_session._advance` holds the existing
+    # window instead of emitting, and `rewrite_playlist` has its own passthrough
+    # fallback. Marking is now purely "is this an ad", and what to do about a
+    # fully-advertising window is decided by the caller that has the context.
     return out
 
 
@@ -442,6 +458,7 @@ def rewrite_playlist(
     *,
     strip_ads: bool = True,
     rewrite_uri: UriRewriter | None = None,
+    trust_titles: bool = True,
 ) -> PlaylistResult:
     """Stateless rewrite: absolutise URIs and drop ads, renumbering from zero.
 
@@ -450,7 +467,9 @@ def rewrite_playlist(
     rewrite cannot keep `#EXT-X-MEDIA-SEQUENCE` monotonic across polls.
     """
     rewriter = rewrite_uri or _default_rewriter
-    parsed = parse_media_playlist(playlist, base_url, strip_ads=strip_ads)
+    parsed = parse_media_playlist(
+        playlist, base_url, strip_ads=strip_ads, trust_titles=trust_titles
+    )
 
     kept = [s for s in parsed.segments if not s.is_ad]
     # Never hand a player an empty playlist - that is a fatal error, whereas an

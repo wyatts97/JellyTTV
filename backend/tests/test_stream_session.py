@@ -224,6 +224,118 @@ async def test_duration_less_ad_daterange_never_empties_the_playlist():
     assert_playlist_continuity([r.text for r in renders])
 
 
+async def test_a_full_ad_pod_is_held_not_served_once_the_window_is_warm():
+    """The regression that put full-quality ad breaks on screen.
+
+    When every segment upstream is an ad, `kept` is empty. The old code read
+    that as "we are about to serve an empty playlist" and passed the entire pod
+    through - so the viewer got the ad in full quality, which is the single
+    outcome ad stripping exists to prevent. It never needed to: `_render`
+    renders the session window, not `kept`, and the window still holds real
+    content, so emitting nothing keeps the playlist valid and simply parks the
+    player at the live edge until the break ends. streamlink behaves the same
+    way - it pauses output for the ad and resumes with a discontinuity.
+    """
+    playlists = [
+        build_playlist(start_seq=100, count=4),  # real content, warms the window
+        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=4, ad_duration=8.0),
+        build_playlist(start_seq=108, count=4, ad_at=104, ad_len=4, ad_duration=8.0),
+        build_playlist(start_seq=112, count=4),  # break ends, real content resumes
+    ]
+    renders, _ = await poll_all(playlists)
+
+    for render in renders:
+        assert "ad10" not in render.text and "ad11" not in render.text, (
+            "an ad segment reached the player"
+        )
+        assert not render.ad_fallback, "a warm session must never pass a pod through"
+        assert render.segment_count > 0, "the window must keep the playlist non-empty"
+
+    # Real content from both sides of the break still gets through.
+    assert "seg100.ts" in renders[0].text
+    assert "seg112.ts" in renders[-1].text
+    assert_playlist_continuity([r.text for r in renders])
+
+    session = stream_session.get("adapt", "best")
+    assert session.stats.ad_hold_polls >= 1
+    assert session.stats.ad_fallback_polls == 0
+
+
+def build_amazon_titled_playlist(*, start_seq: int, count: int = 4) -> str:
+    """A perfectly normal stream whose *name* trips the ad-title heuristic."""
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:2",
+        f"#EXT-X-MEDIA-SEQUENCE:{start_seq}",
+    ]
+    for i in range(count):
+        seq = start_seq + i
+        stamp = (EPOCH + timedelta(seconds=seq * SEG_DURATION)).isoformat()
+        lines.append(f"#EXT-X-PROGRAM-DATE-TIME:{stamp}")
+        lines.append(f"#EXTINF:{SEG_DURATION:.3f},Amazon haul unboxing")
+        lines.append(f"https://video-weaver.a.hls.ttvnw.net/v1/playlist/seg{seq}.ts")
+    return "\n".join(lines) + "\n"
+
+
+async def test_a_misfiring_title_heuristic_recovers_instead_of_killing_the_channel():
+    """The safeguard that makes the deliberately loose title rule survivable.
+
+    Segment titles carry the stream title, so a channel called "Amazon haul
+    unboxing" has every segment classified as an ad. Holding output on that
+    would freeze the channel for as long as anyone watched, and a plain timeout
+    would just re-trigger on the next poll. So the give-up path looks at *why*
+    it was holding: title-only classification with no daterange ever seen is a
+    stream name, not a break, and the heuristic is revoked for the session.
+    """
+    login = "amazonhaul"
+    fetch, _ = make_fetch([build_amazon_titled_playlist(start_seq=100 + i * 4) for i in range(8)])
+    resolve, _ = make_resolve()
+
+    async def poll():
+        render = await stream_session.get_playlist(
+            login=login, quality="best", strip_ads=True, resolve=resolve, fetch=fetch
+        )
+        stream_session.get(login, "best").last_render_at = 0.0
+        return render
+
+    await poll()  # cold session: passes through, warming the window
+    session = stream_session.get(login, "best")
+    assert session.trust_titles, "the heuristic starts trusted"
+
+    await poll()  # now warm, and everything looks like an ad -> hold begins
+    assert session.hold_started_at, "expected a hold to have started"
+
+    # Age the hold past any believable break.
+    session.hold_started_at -= stream_session.MAX_AD_HOLD_SECONDS + 1
+    await poll()
+
+    assert not session.trust_titles, "the heuristic should have been revoked"
+    assert session.stats.ad_hold_giveups == 1
+
+    # And the channel plays normally from here on, rather than staying frozen.
+    before = session.next_seq
+    await poll()
+    assert session.next_seq > before, "playback did not resume after recovery"
+    assert not session.hold_started_at
+
+
+async def test_a_hold_is_cleared_once_real_content_resumes():
+    """A long break must not be mistaken for a stuck one on the next break."""
+    playlists = [
+        build_playlist(start_seq=100, count=4),
+        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=4, ad_duration=8.0),
+        build_playlist(start_seq=108, count=4),
+    ]
+    renders, _ = await poll_all(playlists)
+    session = stream_session.get("adapt", "best")
+
+    assert session.stats.ad_hold_polls >= 1, "the break should have been held"
+    assert not session.hold_started_at, "the hold must reset when content resumes"
+    assert session.trust_titles, "a corroborated pod must not blame the title rule"
+    assert_playlist_continuity([r.text for r in renders])
+
+
 async def test_all_ad_playlist_falls_back_to_passthrough():
     fetch, _ = make_fetch([build_playlist(start_seq=100, count=3, ad_at=100, ad_len=3, ad_duration=6.0)])
     resolve, _ = make_resolve()

@@ -23,11 +23,23 @@ def _param_value(cmd: list[str], flag: str) -> str | None:
     return cmd[cmd.index(flag) + 1] if flag in cmd else None
 
 
-def test_player_type_override_is_sent_by_default():
+def test_no_player_type_override_is_sent_by_default():
+    """Overriding costs quality and does not stop ads, so we must not do it.
+
+    streamlink's Twitch docs say ads get stitched in whichever player type is
+    requested, and warn that a non-default one can be denied the highest quality
+    renditions. Sending an override by default would trade resolution for a
+    benefit that is not there.
+    """
     cmd = _streamlink_cmd(URL, "best", None)
-    assert _param_value(cmd, "--twitch-access-token-param") == (
-        f"playerType={DEFAULT_PLAYER_TYPE}"
-    )
+    assert "--twitch-access-token-param" not in cmd
+    assert DEFAULT_PLAYER_TYPE == PLAYER_TYPE_NONE
+
+
+def test_an_explicit_override_is_still_sent():
+    """The knob has to keep working - this is undocumented, changing behaviour."""
+    cmd = _streamlink_cmd(URL, "best", None, "frontpage")
+    assert _param_value(cmd, "--twitch-access-token-param") == "playerType=frontpage"
 
 
 def test_null_or_blank_player_type_falls_back_to_the_default():

@@ -57,6 +57,13 @@ MAX_WINDOW_SECONDS = 90.0
 
 AD_RANGE_TTL = 300.0
 
+# Longest we will freeze the picture rather than emit a segment we believe is an
+# ad. Comfortably past any real Twitch midroll, so reaching it means the
+# classification is wrong rather than the break being long. Bounding this is
+# what makes aggressive detection safe: a false positive costs a stall, not a
+# dead channel.
+MAX_AD_HOLD_SECONDS = 240.0
+
 # Jellyfin's probe and its ffmpeg both hit the playlist URL; without a short
 # render cache they advance the window twice per real poll.
 RENDER_CACHE_SECONDS = 1.0
@@ -95,6 +102,13 @@ class SessionStats:
     polls: int = 0
     resolves: int = 0
     ad_fallback_polls: int = 0
+    # Polls where the whole upstream window was ads and we emitted nothing.
+    # A healthy channel shows these rising during a break and then stopping;
+    # ad_fallback_polls rising instead means ads reached the player.
+    ad_hold_polls: int = 0
+    # Times a hold outlasted MAX_AD_HOLD_SECONDS and had to be broken. Should be
+    # zero on a healthy channel; anything else means detection misfired.
+    ad_hold_giveups: int = 0
     removed_segments: int = 0
     repeated_renders: int = 0
 
@@ -115,6 +129,11 @@ class StreamSession:
     window: deque[OutputSegment] = field(default_factory=deque)
     seen: OrderedDict[str, tuple[int, float]] = field(default_factory=OrderedDict)
     ad_ranges: dict[str, AdRange] = field(default_factory=dict)
+
+    # When the current run of ad-only polls began (0.0 = not holding), and
+    # whether the EXTINF-title heuristic is still believed for this channel.
+    hold_started_at: float = 0.0
+    trust_titles: bool = True
 
     target_duration: float = 2.0
     version: int = 3
@@ -157,6 +176,11 @@ class StreamSession:
             "target_duration": self.target_duration,
             "consecutive_failures": self.consecutive_failures,
             "known_ad_ranges": sorted(self.ad_ranges),
+            # `trust_titles: false` means the EXTINF-title heuristic misfired on
+            # this channel and was revoked - the first place to look if a stream
+            # stalled once and then played normally.
+            "trust_titles": self.trust_titles,
+            "holding_s": round(now - self.hold_started_at, 1) if self.hold_started_at else 0.0,
             "stats": vars(self.stats),
         }
 
@@ -223,6 +247,50 @@ def _evict(session: StreamSession) -> None:
             session.discontinuity_seq += 1
 
 
+def _hold_exhausted(session: StreamSession, parsed: ParsedPlaylist, now: float) -> bool:
+    """Has this hold outlasted any believable ad break? If so, fix the cause.
+
+    Holding output is right for the length of a real pod and catastrophic past
+    it: a misclassification would otherwise freeze the channel for as long as
+    the viewer is willing to stare at it. The remedy depends on what put us
+    here, so this decides that too rather than blindly unsticking.
+    """
+    if not session.hold_started_at:
+        return False
+    if now - session.hold_started_at <= MAX_AD_HOLD_SECONDS:
+        return False
+
+    session.hold_started_at = 0.0
+    session.stats.ad_hold_giveups += 1
+
+    title_only = all(s.ad_source == "title" for s in parsed.segments if s.is_ad)
+    if title_only and not session.ad_ranges:
+        # The EXTINF-title heuristic matched every segment for minutes on end
+        # with no ad daterange ever corroborating it. A real pod ends; a stream
+        # title does not - this is a channel whose *name* trips the pattern
+        # (the "Amazon haul unboxing" case). Revoke the heuristic for this
+        # session so it cannot re-trigger the moment we resume.
+        session.trust_titles = False
+        log.warning(
+            "ad title heuristic held output too long with no corroborating "
+            "daterange; disabling it for this session",
+            login=session.login,
+            held_s=round(MAX_AD_HOLD_SECONDS, 1),
+        )
+    else:
+        # Believable markers, implausible duration - the remembered ranges have
+        # probably gone stale. Drop them and get a fresh upstream url, which
+        # normally lands past the pod.
+        session.ad_ranges.clear()
+        session.upstream_url = None
+        log.warning(
+            "ad hold exceeded the maximum; dropping ad ranges and re-resolving",
+            login=session.login,
+            held_s=round(MAX_AD_HOLD_SECONDS, 1),
+        )
+    return True
+
+
 def _advance(
     session: StreamSession,
     parsed: ParsedPlaylist,
@@ -251,15 +319,46 @@ def _advance(
 
     ad_fallback = False
     if strip_ads and parsed.segments and not kept:
-        # Serving an ad beats handing ffmpeg an empty playlist, which is fatal.
-        kept = list(parsed.segments)
-        removed = 0
-        ad_fallback = True
-        log.warning(
-            "ad strip would empty the playlist; passing segments through",
-            login=session.login,
-            segments=len(parsed.segments),
-        )
+        if session.window and not _hold_exhausted(session, parsed, now):
+            # Every segment upstream is an ad. Emitting nothing is the whole
+            # point: the window still holds real content, so the rendered
+            # playlist stays valid and non-empty, and the player simply waits at
+            # the live edge until the pod ends. This is what streamlink does too
+            # - it pauses output for the duration of the ad and resumes with a
+            # discontinuity. Passing the pod through instead is what produced
+            # full-quality ad breaks, which is the one outcome ad stripping
+            # exists to prevent.
+            if not session.hold_started_at:
+                session.hold_started_at = now
+            session.pending_discontinuity = True
+            session.stats.ad_hold_polls += 1
+            log.info(
+                "holding output through an ad pod",
+                login=session.login,
+                segments=len(parsed.segments),
+                held_s=round(now - session.hold_started_at, 1),
+            )
+        elif session.window:
+            # The hold ran past MAX_AD_HOLD_SECONDS - longer than any real
+            # midroll - so the classification is not believable any more.
+            # `_hold_exhausted` has already applied the remedy; serve this poll
+            # so playback is not left frozen while it takes effect.
+            kept = list(parsed.segments)
+            removed = 0
+            ad_fallback = True
+        else:
+            # Cold session: there is no window to fall back on, and an empty
+            # playlist is fatal to ffmpeg. Serving the pod is the lesser evil
+            # only here, at the very start of a session.
+            kept = list(parsed.segments)
+            removed = 0
+            ad_fallback = True
+            log.warning(
+                "ad pod on a cold session; passing segments through to avoid an "
+                "empty playlist",
+                login=session.login,
+                segments=len(parsed.segments),
+            )
 
     prev_index: int | None = None
     for seg in kept:
@@ -267,6 +366,11 @@ def _advance(
         if key in session.seen:
             prev_index = seg.index
             continue
+
+        # Real output resumed, so whatever hold was running is over. Measuring
+        # the hold from the last *emitted* segment rather than the last poll is
+        # what stops a long break from being read as a stuck one.
+        session.hold_started_at = 0.0
 
         # A hole in the upstream indices means we removed an ad pod here.
         gap = prev_index is not None and seg.index != prev_index + 1
@@ -381,6 +485,7 @@ async def _poll_upstream(
             strip_ads=strip_ads,
             known_ad_ranges=session.ad_ranges,
             now=now,
+            trust_titles=session.trust_titles,
         )
         if not parsed.segments:
             log.info("upstream playlist had no segments, re-resolving", login=session.login)
@@ -553,7 +658,12 @@ async def preview(
     url = await _acquire_upstream(session, resolve, now)
     status, text = await fetch(url)
     parsed = hls.parse_media_playlist(
-        text, url, strip_ads=strip_ads, known_ad_ranges=session.ad_ranges, now=now
+        text,
+        url,
+        strip_ads=strip_ads,
+        known_ad_ranges=session.ad_ranges,
+        now=now,
+        trust_titles=session.trust_titles,
     )
     before = live.snapshot(now) if live is not None else {"exists": False}
 
@@ -615,6 +725,8 @@ def _clone(session: StreamSession) -> StreamSession:
     clone.window = deque(copy.deepcopy(list(session.window)))
     clone.seen = OrderedDict(session.seen)
     clone.ad_ranges = copy.deepcopy(session.ad_ranges)
+    clone.hold_started_at = session.hold_started_at
+    clone.trust_titles = session.trust_titles
     clone.target_duration = session.target_duration
     clone.version = session.version
     clone.passthrough_tags = list(session.passthrough_tags)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.services.hls import (
+    AdRange,
     is_ad_daterange,
     is_master_playlist,
     parse_attributes,
@@ -212,6 +213,40 @@ def test_duration_less_daterange_does_not_empty_the_playlist():
     assert result.text.strip().endswith("ad2.ts")
 
 
+def test_no_segment_of_a_duration_less_pod_escapes():
+    """The tail un-mark leaked one ad segment per poll for a whole break.
+
+    `parse_media_playlist` used to hand the final segment of a duration-less ad
+    window back "so the live edge is not swallowed". At a ~2s poll cadence that
+    is a continuous drip of ad video, and it also meant the kept set was never
+    empty, so `stream_session` never recognised the pod and never held output.
+    Classification is now absolute; deciding what to do about an all-ad window
+    belongs to the caller.
+    """
+    parsed = parse_media_playlist(MEDIA_DURATIONLESS_AD, BASE)
+    assert all(s.is_ad for s in parsed.segments), "an ad segment escaped classification"
+
+    # The stateless helper still refuses to render nothing, but that is now an
+    # explicit passthrough decision rather than a silent hole in the marking.
+    result = rewrite_playlist(MEDIA_DURATIONLESS_AD, BASE)
+    assert result.segment_count > 0
+
+
+def test_a_long_pod_stays_recognised_past_the_old_sixty_second_cap():
+    """Twitch midrolls run well past 60s; the cap let the remainder play.
+
+    `AdRange.covers()` stopped matching after `_UNKNOWN_AD_WINDOW_SECONDS`, so
+    every segment past that point in a duration-less pod was served as ordinary
+    content - the full-quality ad break.
+    """
+    rng = AdRange(id="stitched-ad-1", start_epoch=1000.0, duration=None)
+    assert rng.covers(1000.0 + 30)
+    assert rng.covers(1000.0 + 90), "a 90s pod must still be recognised"
+    assert rng.covers(1000.0 + 180), "a 3-minute pod must still be recognised"
+    # Still bounded - it cannot swallow the channel indefinitely.
+    assert not rng.covers(1000.0 + 3600)
+
+
 def test_duration_less_ad_tail_is_not_given_back_when_content_survives():
     """The live-edge concession is a last resort, not a per-poll tax.
 
@@ -241,11 +276,45 @@ def test_all_ads_falls_back_to_passthrough_rather_than_empty():
     assert result.segment_count > 0
 
 
-def test_ad_title_heuristic_ignores_the_word_amazon_in_a_stream_title():
-    """`amazon` alone used to match, blanking any stream about Amazon."""
-    result = rewrite_playlist(MEDIA_AMAZON_IN_TITLE, BASE)
+def test_loose_title_match_over_matches_a_stream_named_after_amazon():
+    """The known cost of the deliberately loose title rule, pinned down.
+
+    Segment titles here carry the *stream* title, so "Amazon haul unboxing"
+    matches on every segment and the whole channel reads as one endless advert.
+    This is accepted in exchange for catching pods whose DATERANGE has already
+    scrolled out - but only because it is revocable, which the next test covers.
+    Asserted on parsed `is_ad` flags rather than rendered output: checking
+    `removed_segments` hid this exact condition, because once every segment is
+    misclassified the never-empty fallback restores them all and the counts look
+    perfectly healthy.
+    """
+    parsed = parse_media_playlist(MEDIA_AMAZON_IN_TITLE, BASE)
+    assert [s.is_ad for s in parsed.segments] == [True, True]
+    assert {s.ad_source for s in parsed.segments} == {"title"}
+
+
+def test_titles_can_be_distrusted_so_the_over_match_is_recoverable():
+    """`trust_titles=False` is the escape hatch that makes the loose rule safe.
+
+    Without it, a channel whose name trips the pattern would hold output
+    forever: a real pod ends, a stream title never does. `stream_session` flips
+    this once a hold outlasts any believable break with no daterange to back it
+    up, so the misclassification costs one stall rather than the channel.
+    """
+    parsed = parse_media_playlist(MEDIA_AMAZON_IN_TITLE, BASE, trust_titles=False)
+    assert [s.is_ad for s in parsed.segments] == [False, False]
+
+    result = rewrite_playlist(MEDIA_AMAZON_IN_TITLE, BASE, trust_titles=False)
     assert result.removed_segments == 0
     assert result.segment_count == 2
+
+
+def test_real_stitched_ads_are_still_caught_when_titles_are_distrusted():
+    """Revoking the title heuristic must not disarm daterange detection."""
+    result = rewrite_playlist(MEDIA_WITH_STITCHED_ADS, BASE, trust_titles=False)
+    assert result.removed_segments == 3
+    assert "ad0.ts" not in result.text
+    assert "seg101.ts" in result.text
 
 
 def test_non_ad_daterange_with_twitch_attributes_is_kept():

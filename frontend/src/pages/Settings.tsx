@@ -410,18 +410,18 @@ export default function Settings() {
           <div className="grid gap-4 pt-3 sm:grid-cols-2">
             <Field
               label="Twitch player type"
-              hint="The only setting that stops ads before they reach the stream — stripping them afterwards can only cut a hole where the ad was. Trade-off: a non-default player type can be denied the highest quality renditions, so switch to 'web' if a stream won't play at your chosen quality. Undocumented Twitch behaviour, so try another value if ads return. A Turbo or subscribed account token (above) is the only guaranteed ad-free route."
+              hint="Leave on 'web' unless you are experimenting. Twitch stitches ads in whichever player type is requested, and a non-default one can be denied the highest quality renditions — so changing this usually costs picture quality for no ad reduction. Ads are removed from the playlist instead (see 'Strip stitched ad segments'). The only reliable ad-free source is a Turbo or subscribed account's token, set above."
             >
               <Select
-                value={String(get('twitch_player_type') ?? 'frontpage')}
+                value={String(get('twitch_player_type') ?? 'web')}
                 onChange={(e) => set('twitch_player_type', e.target.value)}
               >
                 {[
-                  ['frontpage', 'frontpage (recommended)'],
+                  ['web', 'web (default — recommended)'],
+                  ['frontpage', 'frontpage'],
                   ['thunderdome', 'thunderdome'],
                   ['embed', 'embed'],
                   ['autoplay', 'autoplay'],
-                  ['web', "web (Twitch default — ads expected)"],
                 ].map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}

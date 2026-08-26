@@ -8,7 +8,7 @@ message-id replay protection.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -32,7 +32,17 @@ router = APIRouter(prefix="/eventsub", tags=["eventsub"])
 @limiter.limit(EVENTSUB_LIMIT)
 async def callback(
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    # Deliberately `= Depends(...)` rather than the `Annotated[...]` form used
+    # everywhere else in this codebase. `@limiter.limit` replaces the endpoint
+    # with a wrapper defined inside slowapi, and older FastAPI resolves this
+    # module's PEP-563 string annotations against *that* wrapper's globals,
+    # where `AsyncSession` and `get_db` do not exist. The annotation then fails
+    # to resolve, the parameter stops looking like a dependency, and FastAPI
+    # demands it as a required query parameter - so every Twitch delivery got a
+    # 422, no subscription ever passed verification, and reconcile churned all
+    # of them on a loop. A Depends *default* is read straight off the parameter
+    # and never needs the annotation evaluated, so it survives either way.
+    session: AsyncSession = Depends(get_db),
 ) -> Response:
     body = await request.body()
     headers = {k.lower(): v for k, v in request.headers.items()}

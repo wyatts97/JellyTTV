@@ -320,12 +320,46 @@ async def test_settings_player_type_round_trip(client: httpx.AsyncClient):
     await _complete_setup(client)
 
     body = (await client.get("/api/settings")).json()
-    assert body["twitch_player_type"] == "frontpage"
+    # Default is "web" - no override. See services/resolver.py for why.
+    assert body["twitch_player_type"] == "web"
 
     updated = await client.put("/api/settings", json={"twitch_player_type": "embed"})
     assert updated.status_code == 200, updated.text
     assert updated.json()["twitch_player_type"] == "embed"
     assert (await client.get("/api/settings")).json()["twitch_player_type"] == "embed"
+
+
+async def test_settings_recovers_from_null_columns_left_by_an_upgrade(
+    client: httpx.AsyncClient,
+):
+    """End-to-end version of the production 500 that hung the settings page.
+
+    An earlier upgrade added notify_* via ALTER TABLE with no DEFAULT, leaving
+    NULLs that SettingsOut refuses to serialise. Startup must repair them so the
+    endpoint answers instead of 500ing.
+    """
+    await _complete_setup(client)
+
+    from sqlalchemy import text
+
+    from app.db import get_engine, init_db
+
+    engine = get_engine()
+    damaged = ("notify_on_live", "notify_title_template", "notify_body_template")
+    async with engine.begin() as conn:
+        for column in damaged:
+            await conn.execute(text(f'ALTER TABLE "settings" DROP COLUMN "{column}"'))
+        for column, ddl_type in zip(damaged, ("BOOLEAN", "VARCHAR", "VARCHAR")):
+            await conn.execute(text(f'ALTER TABLE "settings" ADD COLUMN "{column}" {ddl_type}'))
+
+    await init_db()
+
+    response = await client.get("/api/settings")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["notify_on_live"] is not None
+    assert body["notify_title_template"]
+    assert body["notify_body_template"]
 
 
 async def test_settings_survives_a_null_player_type_column(client: httpx.AsyncClient):
@@ -348,7 +382,7 @@ async def test_settings_survives_a_null_player_type_column(client: httpx.AsyncCl
 
     response = await client.get("/api/settings")
     assert response.status_code == 200, response.text
-    assert response.json()["twitch_player_type"] == "frontpage"
+    assert response.json()["twitch_player_type"] == "web"
 
 
 # --------------------------------------------------------------------- eventsub
@@ -366,6 +400,36 @@ async def test_eventsub_callback_rejects_bad_signatures(client: httpx.AsyncClien
         },
     )
     assert response.status_code == 403
+
+
+async def test_eventsub_callback_declares_no_query_parameters():
+    """The DB session must resolve as a dependency, never as a query parameter.
+
+    `@limiter.limit` swaps in a wrapper defined inside slowapi, and on FastAPI
+    0.115.x this module's PEP-563 string annotations were then evaluated against
+    slowapi's globals. `Annotated[AsyncSession, Depends(get_db)]` failed to
+    resolve there, so FastAPI demanded `session` as a required query parameter
+    and answered every Twitch delivery with 422 - no subscription ever passed
+    verification and reconcile recreated all of them on a loop.
+
+    Asserted against the route's resolved dependant rather than by calling the
+    endpoint, because whether the bug reproduces depends on the installed
+    FastAPI version - this catches it on any of them.
+    """
+    from app.main import app  # noqa: F401  (ensures the router is imported)
+    from app.routers.eventsub import router as eventsub_router
+
+    routes = [
+        r
+        for r in eventsub_router.routes
+        if str(getattr(r, "path", "")).endswith("/callback")
+        and hasattr(r, "dependant")
+    ]
+    assert routes, "the eventsub callback route was not found"
+
+    for route in routes:
+        names = [p.name for p in route.dependant.query_params]
+        assert names == [], f"eventsub callback exposes query params: {names}"
 
 
 async def test_eventsub_challenge_is_echoed_for_a_valid_signature(client: httpx.AsyncClient):
