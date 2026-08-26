@@ -39,6 +39,7 @@ export interface Settings {
   proxy_enabled: boolean
   strip_ads: boolean
   proxy_segments: boolean
+  twitch_player_type: string
   default_quality: string
   guide_window_hours: number
   default_vod_mode: VodMode

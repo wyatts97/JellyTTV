@@ -21,6 +21,27 @@ log = get_logger(__name__)
 STREAMLINK_BIN = "streamlink"
 YTDLP_BIN = "yt-dlp"
 
+# Twitch decides whether to stitch ads into the playlist partly from the
+# `playerType` sent with the access-token request. Asking for a non-default
+# player type is the only thing that stops ads *upstream* - once they are
+# stitched in, the proxy can only choose between showing them and cutting a hole
+# in the stream.
+#
+# `frontpage` is the value streamlink's own Twitch docs name for this; the
+# trade-off they warn about is that a non-default player type can be denied the
+# highest quality renditions. `thunderdome` is community lore that has worked
+# historically but is not documented, so it is offered, not defaulted to.
+# `web` is Twitch's actual default and means "do not override" - the ad-bearing
+# path, kept as an escape hatch for when a stream will not resolve otherwise.
+DEFAULT_PLAYER_TYPE = "frontpage"
+PLAYER_TYPE_NONE = "web"
+PLAYER_TYPES = (DEFAULT_PLAYER_TYPE, "thunderdome", "embed", "autoplay", PLAYER_TYPE_NONE)
+
+
+def resolve_player_type(value: str | None) -> str:
+    """Normalise the configured player type (NULL/blank -> the default)."""
+    return (value or "").strip() or DEFAULT_PLAYER_TYPE
+
 
 class ResolveError(RuntimeError):
     pass
@@ -101,7 +122,9 @@ async def binary_versions() -> dict[str, str | None]:
     return versions
 
 
-def _streamlink_cmd(url: str, quality: str, user_token: str | None) -> list[str]:
+def _streamlink_cmd(
+    url: str, quality: str, user_token: str | None, player_type: str | None = None
+) -> list[str]:
     # No `--twitch-low-latency` here: it only changes streamlink's own buffering
     # and prefetch behaviour during playback, and `--stream-url` makes streamlink
     # print a url and exit. It never affected the playlist we were handed.
@@ -115,6 +138,11 @@ def _streamlink_cmd(url: str, quality: str, user_token: str | None) -> list[str]
         "--http-header",
         "Device-ID=twitch-web-wall-mason",
     ]
+    resolved_player_type = resolve_player_type(player_type)
+    if resolved_player_type != PLAYER_TYPE_NONE:
+        # The lever that actually prevents stitched ads. Undocumented Twitch
+        # behaviour, hence configurable rather than hard-coded.
+        cmd += ["--twitch-access-token-param", f"playerType={resolved_player_type}"]
     if user_token:
         cmd += ["--twitch-api-header", f"Authorization=OAuth {user_token}"]
     cmd += [url, quality or "best"]
@@ -140,11 +168,13 @@ def _looks_offline(text: str) -> bool:
     return any(marker.lower() in lowered for marker in _OFFLINE_MARKERS)
 
 
-async def _resolve(url: str, quality: str, user_token: str | None) -> str:
+async def _resolve(
+    url: str, quality: str, user_token: str | None, player_type: str | None = None
+) -> str:
     errors: list[str] = []
 
     if shutil.which(STREAMLINK_BIN):
-        code, out, err = await _run(_streamlink_cmd(url, quality, user_token))
+        code, out, err = await _run(_streamlink_cmd(url, quality, user_token, player_type))
         if code == 0 and out.startswith("http"):
             return out.splitlines()[0].strip()
         combined = f"{err}\n{out}".strip()
@@ -176,6 +206,7 @@ async def _resolve_cached(
     ttl: float,
     *,
     force: bool = False,
+    player_type: str | None = None,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
@@ -187,17 +218,20 @@ async def _resolve_cached(
         now = time.time()
         if entry and entry.expires_at > now and not force:
             return entry.url
-        resolved = await _resolve(url, quality, user_token)
+        resolved = await _resolve(url, quality, user_token, player_type)
         _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
         return resolved
 
 
-def live_cache_key(login: str, quality: str = "best") -> str:
-    return f"live:{login}:{quality}"
+def live_cache_key(login: str, quality: str = "best", player_type: str | None = None) -> str:
+    # The player type is part of the key, not just something we invalidate on:
+    # two player types resolve to genuinely different playlists (one with ads,
+    # one without), so they must never share a cache entry.
+    return f"live:{login}:{quality}:{resolve_player_type(player_type)}"
 
 
-def invalidate_live(login: str, quality: str = "best") -> None:
-    invalidate(live_cache_key(login, quality))
+def invalidate_live(login: str, quality: str = "best", player_type: str | None = None) -> None:
+    invalidate(live_cache_key(login, quality, player_type))
 
 
 async def resolve_live(
@@ -207,6 +241,7 @@ async def resolve_live(
     user_token: str | None = None,
     ttl: float | None = None,
     force: bool = False,
+    player_type: str | None = None,
 ) -> str:
     """Return the upstream media-playlist url for a live channel.
 
@@ -218,24 +253,30 @@ async def resolve_live(
     """
     cfg = get_config()
     return await _resolve_cached(
-        live_cache_key(login, quality),
+        live_cache_key(login, quality, player_type),
         f"https://www.twitch.tv/{login}",
         quality,
         user_token,
         float(ttl if ttl is not None else cfg.resolver_session_ttl_seconds),
         force=force,
+        player_type=player_type,
     )
 
 
 async def resolve_vod(
-    video_id: str, *, quality: str = "best", user_token: str | None = None
+    video_id: str,
+    *,
+    quality: str = "best",
+    user_token: str | None = None,
+    player_type: str | None = None,
 ) -> str:
     """Return a playable url for a Twitch VOD. Cached longer than live."""
-    key = f"vod:{video_id}:{quality}"
+    key = f"vod:{video_id}:{quality}:{resolve_player_type(player_type)}"
     return await _resolve_cached(
         key,
         f"https://www.twitch.tv/videos/{video_id}",
         quality,
         user_token,
         300.0,
+        player_type=player_type,
     )

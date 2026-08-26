@@ -133,6 +133,7 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
                 login,
                 quality=quality,
                 user_token=settings.twitch_user_token,
+                player_type=settings.row.twitch_player_type,
                 # The first resolve of a session may use the cache; every
                 # subsequent one is a recovery attempt and must be fresh.
                 force=calls["n"] > 1,
@@ -349,6 +350,7 @@ async def vod_stream(
             video_id,
             quality=settings.row.default_quality,
             user_token=settings.twitch_user_token,
+            player_type=settings.row.twitch_player_type,
         )
     except resolver.ResolveError as exc:
         log.warning("vod resolve failed", video_id=video_id, error=str(exc))

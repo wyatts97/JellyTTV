@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Channel, SeasonScheme, Settings, Vod, VodMode, VodState
+from app.services.resolver import PLAYER_TYPES, resolve_player_type
 
 
 class LoginRequest(BaseModel):
@@ -49,6 +51,9 @@ class SettingsUpdate(BaseModel):
     proxy_enabled: bool | None = None
     strip_ads: bool | None = None
     proxy_segments: bool | None = None
+    # Constrained, because a typo here silently reverts you to the ad-bearing
+    # path: Twitch treats an unrecognised playerType as its default.
+    twitch_player_type: Literal[PLAYER_TYPES] | None = None  # type: ignore[valid-type]
     default_quality: str | None = None
     guide_window_hours: int | None = Field(default=None, ge=6, le=336)
 
@@ -86,6 +91,7 @@ class SettingsOut(BaseModel):
     proxy_enabled: bool
     strip_ads: bool
     proxy_segments: bool
+    twitch_player_type: str
     default_quality: str
     guide_window_hours: int
 
@@ -276,6 +282,10 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         proxy_enabled=row.proxy_enabled,
         strip_ads=row.strip_ads,
         proxy_segments=row.proxy_segments,
+        # Coerced, not passed through: the additive migration adds this column
+        # without a DEFAULT, so rows predating it read back NULL and a bare
+        # pass-through would fail response validation on a non-optional str.
+        twitch_player_type=resolve_player_type(row.twitch_player_type),
         default_quality=row.default_quality,
         guide_window_hours=row.guide_window_hours,
         default_vod_mode=row.default_vod_mode,

@@ -13,6 +13,7 @@ import {
   CopyRow,
   Field,
   Input,
+  QueryError,
   Select,
   Spinner,
   Toggle,
@@ -88,6 +89,21 @@ export default function Settings() {
     onSuccess: (r) => (r.ok ? toast.success(r.message) : toast.error(r.message)),
     onError: (error: ApiError) => toast.error(error.message),
   })
+
+  // Three states, not two. Collapsing these into `isLoading || !data` is what
+  // left the page spinning forever: on a failed request react-query clears
+  // isLoading but never populates data, so `!data` stayed true with nothing on
+  // screen to say why.
+  if (settings.isError) {
+    return (
+      <QueryError
+        title="Could not load settings"
+        error={settings.error}
+        onRetry={() => void settings.refetch()}
+        pending={settings.isFetching}
+      />
+    )
+  }
 
   if (settings.isLoading || !settings.data) {
     return (
@@ -392,6 +408,27 @@ export default function Settings() {
             description="Recommended: Jellyfin keys channels by id, so removing them churns its database and loses favourites."
           />
           <div className="grid gap-4 pt-3 sm:grid-cols-2">
+            <Field
+              label="Twitch player type"
+              hint="The only setting that stops ads before they reach the stream — stripping them afterwards can only cut a hole where the ad was. Trade-off: a non-default player type can be denied the highest quality renditions, so switch to 'web' if a stream won't play at your chosen quality. Undocumented Twitch behaviour, so try another value if ads return. A Turbo or subscribed account token (above) is the only guaranteed ad-free route."
+            >
+              <Select
+                value={String(get('twitch_player_type') ?? 'frontpage')}
+                onChange={(e) => set('twitch_player_type', e.target.value)}
+              >
+                {[
+                  ['frontpage', 'frontpage (recommended)'],
+                  ['thunderdome', 'thunderdome'],
+                  ['embed', 'embed'],
+                  ['autoplay', 'autoplay'],
+                  ['web', "web (Twitch default — ads expected)"],
+                ].map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <Field label="Default stream quality">
               <Select
                 value={String(get('default_quality') ?? 'best')}
@@ -498,6 +535,18 @@ export default function Settings() {
                 value={String(diagnostics.data.config.max_concurrent_downloads)}
               />
             </dl>
+          ) : diagnostics.isError ? (
+            <p className="text-xs text-ink-400">
+              Could not load diagnostics:{' '}
+              {diagnostics.error instanceof Error ? diagnostics.error.message : 'unknown error'}{' '}
+              <button
+                type="button"
+                className="text-twitch-400 underline underline-offset-2 hover:text-twitch-300"
+                onClick={() => void diagnostics.refetch()}
+              >
+                Retry
+              </button>
+            </p>
           ) : (
             <Spinner />
           )}

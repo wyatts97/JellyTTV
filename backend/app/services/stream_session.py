@@ -47,9 +47,13 @@ log = get_logger(__name__)
 SEEN_TTL = 120.0
 SEEN_MAX = 512
 
-MIN_WINDOW = 3
+# The floor exists so eviction cannot starve the player. At 3 segments (~6s of
+# 2s segments) ffmpeg runs dry as soon as an ad pod is cut out of the window,
+# which is the stutter at an ad break. Keeping more history costs a little
+# latency behind the live edge and buys continuous playback across a removal.
+MIN_WINDOW = 6
 MAX_WINDOW = 20
-MAX_WINDOW_SECONDS = 60.0
+MAX_WINDOW_SECONDS = 90.0
 
 AD_RANGE_TTL = 300.0
 

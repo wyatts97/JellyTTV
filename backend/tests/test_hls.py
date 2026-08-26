@@ -162,6 +162,21 @@ ad1.ts
 ad2.ts
 """
 
+MEDIA_DURATIONLESS_AD_AFTER_CONTENT = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:2.000,
+seg100.ts
+#EXTINF:2.000,
+seg101.ts
+#EXT-X-DATERANGE:ID="stitched-ad-9",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z"
+#EXTINF:2.000,
+ad0.ts
+#EXTINF:2.000,
+ad1.ts
+"""
+
 MEDIA_AMAZON_IN_TITLE = """#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:2
@@ -195,6 +210,26 @@ def test_duration_less_daterange_does_not_empty_the_playlist():
     result = rewrite_playlist(MEDIA_DURATIONLESS_AD, BASE)
     assert result.segment_count >= 1
     assert result.text.strip().endswith("ad2.ts")
+
+
+def test_duration_less_ad_tail_is_not_given_back_when_content_survives():
+    """The live-edge concession is a last resort, not a per-poll tax.
+
+    Handing the final ad segment back on every poll leaks a slice of the
+    commercial into the stream for the whole pod - that is the ad screen viewers
+    actually see. It is only worth it when nothing else survived.
+    """
+    parsed = parse_media_playlist(MEDIA_DURATIONLESS_AD_AFTER_CONTENT, BASE)
+    assert [s.uri.rsplit("/", 1)[-1] for s in parsed.segments if s.is_ad] == [
+        "ad0.ts",
+        "ad1.ts",
+    ]
+
+    result = rewrite_playlist(MEDIA_DURATIONLESS_AD_AFTER_CONTENT, BASE)
+    assert result.removed_segments == 2
+    assert "ad0.ts" not in result.text
+    assert "ad1.ts" not in result.text
+    assert "seg101.ts" in result.text
 
 
 def test_all_ads_falls_back_to_passthrough_rather_than_empty():

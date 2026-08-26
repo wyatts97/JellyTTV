@@ -1,5 +1,6 @@
 import { forwardRef, type ReactNode } from 'react'
-import { Loader2, X } from 'lucide-react'
+import { AlertTriangle, Loader2, X } from 'lucide-react'
+import { ApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 /* ------------------------------------------------------------------ Button */
@@ -327,6 +328,53 @@ export function EmptyState({
       </div>
       {action}
     </div>
+  )
+}
+
+/**
+ * Terminal state for a failed query. Exists because the alternative pattern -
+ * rendering a Spinner whenever data is absent - is indistinguishable from
+ * loading and leaves a failed page spinning forever with no way to recover.
+ */
+export function QueryError({
+  title = 'Something went wrong',
+  error,
+  onRetry,
+  pending,
+}: {
+  title?: string
+  error: unknown
+  onRetry?: () => void
+  pending?: boolean
+}) {
+  const status = error instanceof ApiError ? error.status : undefined
+  const message = error instanceof Error ? error.message : String(error ?? 'Unknown error')
+
+  return (
+    <Card>
+      <EmptyState
+        icon={<AlertTriangle className="size-6 text-amber-400" aria-hidden />}
+        title={title}
+        description={
+          <>
+            {status !== undefined && (
+              <Badge tone="danger" className="mr-2 align-middle">
+                {status}
+              </Badge>
+            )}
+            {message}
+            {status === 401 && ' — your session has expired. Sign in again to continue.'}
+          </>
+        }
+        action={
+          onRetry && (
+            <Button variant="secondary" size="sm" onClick={onRetry} loading={pending}>
+              Retry
+            </Button>
+          )
+        }
+      />
+    </Card>
   )
 }
 

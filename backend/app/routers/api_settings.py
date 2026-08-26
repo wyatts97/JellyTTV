@@ -11,7 +11,7 @@ from app.logging_conf import get_logger
 from app.schemas import ConnectionTest, JellyfinLibraryOut, SettingsOut, SettingsUpdate, settings_out
 from app.security import AdminUser
 from app.services import eventsub as eventsub_service
-from app.services import notifications
+from app.services import notifications, resolver, stream_session
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings, get_settings_row, update_settings
 from app.services.twitch import TwitchClient, TwitchError
@@ -38,6 +38,11 @@ async def write_settings(
     before = await get_settings(session)
     was_eventsub = before.row.eventsub_enabled
     previous_callback = before.eventsub_callback_url()
+    previous_stream_shape = (
+        before.row.twitch_player_type,
+        before.row.strip_ads,
+        before.row.default_quality,
+    )
 
     values = payload.model_dump(exclude_unset=True)
     # `eventsub_enabled` and empty-string clears must survive the None filter in
@@ -61,6 +66,22 @@ async def write_settings(
                 log.info("removed eventsub subscriptions after disable", count=removed)
             except TwitchError as exc:
                 log.warning("could not tear down subscriptions", error=str(exc))
+
+    # Anything that changes the shape of the upstream stream makes both the
+    # resolved urls and the in-flight sessions stale: a session pins the url it
+    # was handed, so without this a player-type change would not take effect
+    # until every current session aged out.
+    if previous_stream_shape != (
+        settings.row.twitch_player_type,
+        settings.row.strip_ads,
+        settings.row.default_quality,
+    ):
+        resolver.invalidate()
+        stream_session.reset()
+        log.info(
+            "stream settings changed; dropped resolver cache and sessions",
+            player_type=settings.row.twitch_player_type,
+        )
 
     # Base url or token changes invalidate every .strm file we wrote.
     if {"self_base_url", "public_base_url"} & values.keys():

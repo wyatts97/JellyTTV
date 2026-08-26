@@ -316,6 +316,41 @@ async def test_settings_update_round_trip(client: httpx.AsyncClient):
     assert (await client.get("/api/settings")).json()["strip_ads"] is False
 
 
+async def test_settings_player_type_round_trip(client: httpx.AsyncClient):
+    await _complete_setup(client)
+
+    body = (await client.get("/api/settings")).json()
+    assert body["twitch_player_type"] == "frontpage"
+
+    updated = await client.put("/api/settings", json={"twitch_player_type": "embed"})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["twitch_player_type"] == "embed"
+    assert (await client.get("/api/settings")).json()["twitch_player_type"] == "embed"
+
+
+async def test_settings_survives_a_null_player_type_column(client: httpx.AsyncClient):
+    """Rows predating the column read back NULL, not the model default.
+
+    `_add_missing_columns` issues ALTER TABLE ADD COLUMN without a DEFAULT, so an
+    upgraded database has NULL here. A bare pass-through would fail response
+    validation on a non-optional str and 500 the whole settings page - which is
+    precisely the failure mode that leaves the UI spinning.
+    """
+    await _complete_setup(client)
+
+    from app.db import session_scope
+    from app.services.settings_store import get_settings_row
+
+    async with session_scope() as session:
+        row = await get_settings_row(session)
+        row.twitch_player_type = None
+        session.add(row)
+
+    response = await client.get("/api/settings")
+    assert response.status_code == 200, response.text
+    assert response.json()["twitch_player_type"] == "frontpage"
+
+
 # --------------------------------------------------------------------- eventsub
 async def test_eventsub_callback_rejects_bad_signatures(client: httpx.AsyncClient):
     await _complete_setup(client)

@@ -87,6 +87,12 @@ class Settings(SQLModel, table=True):
     proxy_enabled: bool = True
     strip_ads: bool = True
     proxy_segments: bool = False  # False = 302 redirect segments to Twitch CDN
+    # Overrides the `playerType` sent with Twitch's access-token request. Twitch
+    # stitches fewer (often zero) ads for player types other than its own `web`
+    # default. Nullable because the additive migration in db.py adds columns
+    # without a DEFAULT, so rows predating it read back NULL rather than the
+    # default above; readers coerce through resolver.resolve_player_type.
+    twitch_player_type: str | None = None
     default_quality: str = "best"
     guide_window_hours: int = 48
 

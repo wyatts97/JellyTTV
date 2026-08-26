@@ -369,11 +369,17 @@ def parse_media_playlist(
     # A duration-less ad window must not swallow the live edge: if we are still
     # inside one when the playlist ends, give the final segment back. An explicit
     # discontinuity would have closed the window properly.
+    #
+    # Only when *nothing* else survived, though. Handing the tail back on every
+    # poll leaks a segment of the commercial into the stream for the whole pod,
+    # which is the ad screen users actually see. As a last-resort valve against
+    # an empty playlist it is worth it; as a routine concession it is not.
     if in_ad and not ad_known_duration and out.segments:
-        tail = out.segments[-1]
-        if tail.is_ad and tail.ad_source == "daterange":
-            tail.is_ad = False
-            tail.ad_source = None
+        if not any(not s.is_ad for s in out.segments):
+            tail = out.segments[-1]
+            if tail.is_ad and tail.ad_source == "daterange":
+                tail.is_ad = False
+                tail.ad_source = None
 
     return out
 
