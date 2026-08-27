@@ -48,6 +48,45 @@ def resolve_player_type(value: str | None) -> str:
     return (value or "").strip() or DEFAULT_PLAYER_TYPE
 
 
+# Twitch decides whether to stitch ads in when it mints the playback access
+# token, based partly on where the request came from. Asking for the token from
+# a region that carries no ad inventory is therefore the one lever that stops
+# ads *before* they exist, which is the whole design of TTV LOL PRO: it never
+# filters a playlist, it just re-issues the token and manifest requests through
+# an HTTP proxy in an ad-free region.
+#
+# `--stream-url` makes streamlink perform exactly those two requests and then
+# print a url and exit, so a single proxy flag covers the same request set the
+# extension proxies - and nothing else. Segments and later playlist polls stay
+# direct: they carry the video, and pushing that through a volunteer-run proxy
+# would be both slower and abusive.
+DEFAULT_PROXY_URL = "http://chromium.api.cdn-perfprod.com:2023"
+
+
+def normalise_proxy_url(value: str | None) -> str | None:
+    """Blank -> None (disabled). A bare host:port gets an http:// scheme."""
+    proxy = (value or "").strip()
+    if not proxy:
+        return None
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+    return proxy
+
+
+def configured_proxy(value: str | None) -> str | None:
+    """Resolve the stored setting to the proxy actually used.
+
+    `None` means "never configured" - which includes the NULL an upgraded
+    database starts with - and selects the default, because the feature ships
+    on. An explicit empty string is the off switch. The two are deliberately not
+    collapsed: without the distinction there is no way to express "off" that
+    survives a restart, since the default would keep reasserting itself.
+    """
+    if value is None:
+        return DEFAULT_PROXY_URL
+    return normalise_proxy_url(value)
+
+
 class ResolveError(RuntimeError):
     pass
 
@@ -127,8 +166,28 @@ async def binary_versions() -> dict[str, str | None]:
     return versions
 
 
+def proxy_for(user_token: str | None, proxy_url: str | None) -> str | None:
+    """The proxy to actually use, which is never one carrying a credential.
+
+    Routing an authenticated resolve through a third-party proxy would hand that
+    OAuth token to whoever runs it, and buys nothing: a Turbo or subscribed
+    account already gets an ad-free playlist straight from Twitch, which is the
+    outcome the proxy exists to approximate. So the token wins and the proxy is
+    dropped - a hard rule, not a warning.
+    """
+    proxy = normalise_proxy_url(proxy_url)
+    if proxy and user_token:
+        log.info("not proxying an authenticated resolve; using the token directly")
+        return None
+    return proxy
+
+
 def _streamlink_cmd(
-    url: str, quality: str, user_token: str | None, player_type: str | None = None
+    url: str,
+    quality: str,
+    user_token: str | None,
+    player_type: str | None = None,
+    proxy_url: str | None = None,
 ) -> list[str]:
     # No `--twitch-low-latency` here: it only changes streamlink's own buffering
     # and prefetch behaviour during playback, and `--stream-url` makes streamlink
@@ -145,9 +204,14 @@ def _streamlink_cmd(
     ]
     resolved_player_type = resolve_player_type(player_type)
     if resolved_player_type != PLAYER_TYPE_NONE:
-        # The lever that actually prevents stitched ads. Undocumented Twitch
-        # behaviour, hence configurable rather than hard-coded.
+        # Undocumented Twitch behaviour, hence configurable rather than
+        # hard-coded. Off by default - see the comment on PLAYER_TYPE_NONE.
         cmd += ["--twitch-access-token-param", f"playerType={resolved_player_type}"]
+    proxy = proxy_for(user_token, proxy_url)
+    if proxy:
+        # Covers only the token and manifest requests, because `--stream-url`
+        # exits before any media is fetched.
+        cmd += ["--http-proxy", proxy]
     if user_token:
         cmd += ["--twitch-api-header", f"Authorization=OAuth {user_token}"]
     cmd += [url, quality or "best"]
@@ -174,18 +238,43 @@ def _looks_offline(text: str) -> bool:
 
 
 async def _resolve(
-    url: str, quality: str, user_token: str | None, player_type: str | None = None
+    url: str,
+    quality: str,
+    user_token: str | None,
+    player_type: str | None = None,
+    proxy_url: str | None = None,
 ) -> str:
     errors: list[str] = []
 
     if shutil.which(STREAMLINK_BIN):
-        code, out, err = await _run(_streamlink_cmd(url, quality, user_token, player_type))
-        if code == 0 and out.startswith("http"):
-            return out.splitlines()[0].strip()
-        combined = f"{err}\n{out}".strip()
-        if _looks_offline(combined):
-            raise ChannelOffline("channel is offline")
-        errors.append(f"streamlink: {combined[:300] or f'exit {code}'}")
+        # Proxied first, then direct. The proxy is third-party infrastructure
+        # maintained for someone else's users: it can vanish, rate-limit, or
+        # start refusing non-browser clients without notice, and none of that
+        # may be allowed to take a stream down. Ads are worth avoiding; a dead
+        # channel is not worth trading for them.
+        attempts = [proxy_for(user_token, proxy_url), None]
+        if attempts[0] is None:
+            attempts = [None]
+
+        for attempt, proxy in enumerate(attempts):
+            code, out, err = await _run(
+                _streamlink_cmd(url, quality, user_token, player_type, proxy)
+            )
+            if code == 0 and out.startswith("http"):
+                return out.splitlines()[0].strip()
+            combined = f"{err}\n{out}".strip()
+            if _looks_offline(combined):
+                # Offline is a fact about the channel, not the route - retrying
+                # without the proxy would only spawn streamlink for nothing.
+                raise ChannelOffline("channel is offline")
+            if proxy is not None and attempt + 1 < len(attempts):
+                log.warning(
+                    "proxied resolve failed; retrying directly",
+                    proxy=proxy,
+                    error=combined[:200] or f"exit {code}",
+                )
+                continue
+            errors.append(f"streamlink: {combined[:300] or f'exit {code}'}")
     else:
         errors.append("streamlink: binary not found")
 
@@ -212,6 +301,7 @@ async def _resolve_cached(
     *,
     force: bool = False,
     player_type: str | None = None,
+    proxy_url: str | None = None,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
@@ -223,20 +313,31 @@ async def _resolve_cached(
         now = time.time()
         if entry and entry.expires_at > now and not force:
             return entry.url
-        resolved = await _resolve(url, quality, user_token, player_type)
+        resolved = await _resolve(url, quality, user_token, player_type, proxy_url)
         _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
         return resolved
 
 
-def live_cache_key(login: str, quality: str = "best", player_type: str | None = None) -> str:
-    # The player type is part of the key, not just something we invalidate on:
-    # two player types resolve to genuinely different playlists (one with ads,
-    # one without), so they must never share a cache entry.
-    return f"live:{login}:{quality}:{resolve_player_type(player_type)}"
+def live_cache_key(
+    login: str,
+    quality: str = "best",
+    player_type: str | None = None,
+    proxy_url: str | None = None,
+) -> str:
+    # Player type and proxy are part of the key, not just things we invalidate
+    # on: each produces a genuinely different playlist - one carrying ads, one
+    # not - so they must never share a cache entry.
+    proxy = normalise_proxy_url(proxy_url) or "direct"
+    return f"live:{login}:{quality}:{resolve_player_type(player_type)}:{proxy}"
 
 
-def invalidate_live(login: str, quality: str = "best", player_type: str | None = None) -> None:
-    invalidate(live_cache_key(login, quality, player_type))
+def invalidate_live(
+    login: str,
+    quality: str = "best",
+    player_type: str | None = None,
+    proxy_url: str | None = None,
+) -> None:
+    invalidate(live_cache_key(login, quality, player_type, proxy_url))
 
 
 async def resolve_live(
@@ -247,6 +348,7 @@ async def resolve_live(
     ttl: float | None = None,
     force: bool = False,
     player_type: str | None = None,
+    proxy_url: str | None = None,
 ) -> str:
     """Return the upstream media-playlist url for a live channel.
 
@@ -255,16 +357,21 @@ async def resolve_live(
     upstream actually breaks, so the cache is a warm-start aid, not the thing
     keeping streamlink from being respawned. `force=True` bypasses the cache and
     is used by that failure path.
+
+    `proxy_url` routes the token and manifest requests through an HTTP proxy so
+    Twitch mints the token for that proxy's region. Ignored when `user_token` is
+    set - see `proxy_for`.
     """
     cfg = get_config()
     return await _resolve_cached(
-        live_cache_key(login, quality, player_type),
+        live_cache_key(login, quality, player_type, proxy_url),
         f"https://www.twitch.tv/{login}",
         quality,
         user_token,
         float(ttl if ttl is not None else cfg.resolver_session_ttl_seconds),
         force=force,
         player_type=player_type,
+        proxy_url=proxy_url,
     )
 
 
@@ -275,7 +382,13 @@ async def resolve_vod(
     user_token: str | None = None,
     player_type: str | None = None,
 ) -> str:
-    """Return a playable url for a Twitch VOD. Cached longer than live."""
+    """Return a playable url for a Twitch VOD. Cached longer than live.
+
+    Deliberately takes no proxy: TTV LOL PRO excludes VODs from proxying too
+    (`getFetch.ts` skips numeric ids), because VOD ads are not stitched the same
+    way and a proxy would only add latency to a long download. Not accepting the
+    argument at all beats accepting one that is silently ignored.
+    """
     key = f"vod:{video_id}:{quality}:{resolve_player_type(player_type)}"
     return await _resolve_cached(
         key,

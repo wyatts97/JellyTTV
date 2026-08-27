@@ -27,7 +27,7 @@ from app.db import get_db
 from app.logging_conf import get_logger
 from app.security import require_tuner_token
 from app.services import channels as channel_service
-from app.services import hls, resolver, stream_session
+from app.services import ad_events, adblock, hls, resolver, stream_session
 from app.services import http as shared_http
 from app.services.http import UPSTREAM_HEADERS
 from app.services.settings_store import ResolvedSettings, get_settings
@@ -126,14 +126,20 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
     """
     calls = {"n": 0}
 
-    async def resolve() -> str:
+    async def resolve(prefer_direct: bool = False) -> str:
         calls["n"] += 1
+        # `prefer_direct` is the session telling us an ad arrived over the route
+        # we last used, so mint the next token from the other side of the proxy.
+        proxy = None if prefer_direct else resolver.configured_proxy(
+            settings.row.twitch_proxy_url
+        )
         try:
             return await resolver.resolve_live(
                 login,
                 quality=quality,
                 user_token=settings.twitch_user_token,
                 player_type=settings.row.twitch_player_type,
+                proxy_url=proxy,
                 # The first resolve of a session may use the cache; every
                 # subsequent one is a recovery attempt and must be fresh.
                 force=calls["n"] > 1,
@@ -150,6 +156,47 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
             ) from exc
 
     return resolve
+
+
+def _make_backup_finder(login: str, settings: ResolvedSettings):
+    """Build the backup search, or None when the strategy does not use one.
+
+    Only the TTV-AB strategy substitutes a backup stream. Under `ttv_lol_pro`
+    the ad is meant to never exist (the token is minted through an ad-free
+    region), and under `strip_only` an ad pod is simply not served - so in both
+    cases going and fetching another player type would be wasted work.
+    """
+    strategy = adblock.configured_strategy(settings.row.ad_block_strategy)
+    if strategy != adblock.STRATEGY_TTV_AB or not settings.row.strip_ads:
+        return None
+
+    async def find(state: adblock.BackupState, quality: str):
+        return await adblock.find_backup(
+            login=login,
+            quality=quality,
+            native_player_type=resolver.resolve_player_type(
+                settings.row.twitch_player_type
+            ),
+            state=state,
+            fetch=_fetch_playlist,
+            user_token=settings.twitch_user_token,
+            allow_low_quality=settings.row.ad_backup_low_quality,
+        )
+
+    return find
+
+
+def _make_ad_reporter(settings: ResolvedSettings):
+    """Build the ad-progress reporter, or None when spoofing is disabled."""
+    if not settings.row.ad_spoofing:
+        return None
+
+    async def report(playlist: str) -> int:
+        return await ad_events.report_blocked_ads(
+            playlist, user_token=settings.twitch_user_token
+        )
+
+    return report
 
 
 async def _resolve_channel(
@@ -237,6 +284,8 @@ async def _session_playlist(
                 base, login, key_suffix, settings.row.proxy_segments
             ),
             variant=variant,
+            backup=_make_backup_finder(login, settings),
+            report_ads=_make_ad_reporter(settings),
         )
     except stream_session.SessionError as exc:
         raise HTTPException(
@@ -256,6 +305,7 @@ async def _session_playlist(
             segments=render.removed_segments,
             media_sequence=render.media_sequence,
             discontinuity_sequence=render.discontinuity_sequence,
+            backup=render.backup_player_type,
         )
     return Response(render.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
 
@@ -276,7 +326,9 @@ async def media_playlist(
         pinned = decode_url(u)
         variant = hashlib.sha1(u.encode()).hexdigest()[:12]
 
-        async def resolve() -> str:
+        async def resolve(prefer_direct: bool = False) -> str:
+            # A pinned variant has no token of its own to re-mint, so the
+            # polarity flip has nothing to act on here.
             return pinned
     else:
         variant = None

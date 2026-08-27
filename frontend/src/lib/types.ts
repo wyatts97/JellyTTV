@@ -40,6 +40,11 @@ export interface Settings {
   strip_ads: boolean
   proxy_segments: boolean
   twitch_player_type: string
+  twitch_proxy_url: string
+  twitch_proxy_active: boolean
+  ad_block_strategy: string
+  ad_backup_low_quality: boolean
+  ad_spoofing: boolean
   default_quality: string
   guide_window_hours: number
   default_vod_mode: VodMode

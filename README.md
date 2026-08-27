@@ -192,6 +192,21 @@ cd frontend && npm run build
 
 Requires Python 3.12+, Node 22+, Redis, plus `ffmpeg`, `streamlink` and `yt-dlp` on `PATH`.
 
+## Credits
+
+Ad blocking follows techniques worked out by two browser extensions:
+
+- **[TTV AB](https://github.com/GosuDRM/TTV-AB)** by GosuDRM — the backup-stream strategy
+  (`backend/app/services/adblock.py`) and the ad-progress signalling
+  (`backend/app/services/ad_events.py`). Twitch stitches ads per playback token, so the same
+  channel requested for a different player type is usually not in the same break; playing that
+  during a break is what keeps the picture moving instead of stopping. Used under its MIT-based
+  licence with attribution.
+- **[TTV LOL PRO](https://github.com/younesaassila/ttv-lol-pro)** by Younes Aassila — the
+  ad-free-region proxy strategy, selectable as an alternative.
+
+Both techniques were reimplemented from observed behaviour; no source was copied.
+
 ## Licence
 
 MIT

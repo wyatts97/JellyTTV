@@ -6,7 +6,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Channel, SeasonScheme, Settings, Vod, VodMode, VodState
-from app.services.resolver import PLAYER_TYPES, resolve_player_type
+from app.services.adblock import STRATEGIES, configured_strategy
+from app.services.resolver import (
+    PLAYER_TYPES,
+    configured_proxy,
+    proxy_for,
+    resolve_player_type,
+)
 
 
 class LoginRequest(BaseModel):
@@ -54,6 +60,12 @@ class SettingsUpdate(BaseModel):
     # Constrained, because a typo here silently reverts you to the ad-bearing
     # path: Twitch treats an unrecognised playerType as its default.
     twitch_player_type: Literal[PLAYER_TYPES] | None = None  # type: ignore[valid-type]
+    # Empty string is meaningful here - it is how the proxy is turned off - so
+    # this must survive the `is not None` filter in the settings writer.
+    twitch_proxy_url: str | None = Field(default=None, max_length=500)
+    ad_block_strategy: Literal[STRATEGIES] | None = None  # type: ignore[valid-type]
+    ad_backup_low_quality: bool | None = None
+    ad_spoofing: bool | None = None
     default_quality: str | None = None
     guide_window_hours: int | None = Field(default=None, ge=6, le=336)
 
@@ -92,6 +104,14 @@ class SettingsOut(BaseModel):
     strip_ads: bool
     proxy_segments: bool
     twitch_player_type: str
+    # The proxy actually in effect; "" means disabled. Reporting the effective
+    # value rather than the raw column is what lets the UI show the default that
+    # an unconfigured install is really using.
+    twitch_proxy_url: str
+    twitch_proxy_active: bool
+    ad_block_strategy: str
+    ad_backup_low_quality: bool
+    ad_spoofing: bool
     default_quality: str
     guide_window_hours: int
 
@@ -286,6 +306,18 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         # without a DEFAULT, so rows predating it read back NULL and a bare
         # pass-through would fail response validation on a non-optional str.
         twitch_player_type=resolve_player_type(row.twitch_player_type),
+        twitch_proxy_url=configured_proxy(row.twitch_proxy_url) or "",
+        # Surfaced separately because a configured proxy is still not a used
+        # one: a user token always wins, and the UI needs to say so rather than
+        # showing a proxy that is silently doing nothing.
+        twitch_proxy_active=bool(
+            proxy_for(
+                resolved.twitch_user_token, configured_proxy(row.twitch_proxy_url)
+            )
+        ),
+        ad_block_strategy=configured_strategy(row.ad_block_strategy),
+        ad_backup_low_quality=row.ad_backup_low_quality,
+        ad_spoofing=row.ad_spoofing,
         default_quality=row.default_quality,
         guide_window_hours=row.guide_window_hours,
         default_vod_mode=row.default_vod_mode,

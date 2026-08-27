@@ -4,6 +4,8 @@
 .env
 *.md
 docs/
+ttv-lol-pro
+TTV-AB
 
 # Local dev artefacts - these would otherwise bloat the build context enormously
 **/.venv

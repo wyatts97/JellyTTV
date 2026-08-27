@@ -391,8 +391,43 @@ export default function Settings() {
             checked={Boolean(get('strip_ads'))}
             disabled={!get('proxy_enabled')}
             onChange={(v) => set('strip_ads', v)}
-            label="Strip stitched ad segments"
-            description="Removes segments inside twitch-stitched-ad date ranges and inserts a discontinuity."
+            label="Block ads"
+            description="Detects Twitch's stitched ad segments and keeps them out of the stream. Turn off to watch the raw Twitch feed, ads and all."
+          />
+          <div className="pt-3">
+            <Field
+              label="Ad blocking strategy"
+              hint="Twitch decides whether to stitch an ad in when it issues the stream token, so a token issued for a different player type usually isn't in the same ad break. Backup stream exploits that: during a break it plays the same channel from a clean source, so the picture keeps moving instead of stopping."
+            >
+              <Select
+                value={String(get('ad_block_strategy') ?? 'ttv_ab')}
+                disabled={!get('strip_ads') || !get('proxy_enabled')}
+                onChange={(e) => set('ad_block_strategy', e.target.value)}
+              >
+                {[
+                  ['ttv_ab', 'Backup stream (recommended)'],
+                  ['ttv_lol_pro', 'Ad-free region proxy'],
+                  ['strip_only', 'Remove ads only — gap during breaks'],
+                ].map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <Toggle
+            checked={Boolean(get('ad_backup_low_quality'))}
+            disabled={get('ad_block_strategy') !== 'ttv_ab' || !get('strip_ads')}
+            onChange={(v) => set('ad_backup_low_quality', v)}
+            label="Allow lower quality during ad breaks"
+            description="If no clean backup exists at your normal quality, drop as low as 360p to keep the picture moving, then restore it afterwards. Off means breaks fall back to a gap when only a lower-quality source is clean."
+          />
+          <Toggle
+            checked={Boolean(get('ad_spoofing'))}
+            onChange={(v) => set('ad_spoofing', v)}
+            label="Report blocked ads as watched"
+            description="Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."
           />
           <Toggle
             checked={Boolean(get('proxy_segments'))}
@@ -407,6 +442,24 @@ export default function Settings() {
             label="Keep offline channels in the tuner"
             description="Recommended: Jellyfin keys channels by id, so removing them churns its database and loses favourites."
           />
+          <div className="pt-3">
+            <Field
+              label="Ad-avoidance proxy"
+              hint={
+                current.twitch_proxy_active
+                  ? "Twitch decides whether to stitch an ad in when it issues the stream token, so requesting that token from a region carrying no ads is the only way to stop ads existing rather than cutting them out afterwards. Only the token and playlist lookups go through here — never your video, and never your account token. This is a third-party server run by volunteers: it can go down or start refusing requests, in which case JellyTTV silently falls back to a direct connection. Clear the field to disable. Point it at your own server for something you control."
+                  : "Disabled. A Twitch account token is set above, which already gives an ad-free stream, so the proxy is skipped — routing your credential through someone else's server would give it away for nothing. Clear the token to use a proxy instead."
+              }
+            >
+              <Input
+                type="text"
+                placeholder="http://host:port — empty to disable"
+                disabled={Boolean(current.twitch_user_token_set)}
+                value={String(get('twitch_proxy_url') ?? '')}
+                onChange={(e) => set('twitch_proxy_url', e.target.value)}
+              />
+            </Field>
+          </div>
           <div className="grid gap-4 pt-3 sm:grid-cols-2">
             <Field
               label="Twitch player type"

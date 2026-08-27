@@ -40,6 +40,9 @@ async def write_settings(
     previous_callback = before.eventsub_callback_url()
     previous_stream_shape = (
         before.row.twitch_player_type,
+        before.row.twitch_proxy_url,
+        before.row.ad_block_strategy,
+        before.row.ad_backup_low_quality,
         before.row.strip_ads,
         before.row.default_quality,
     )
@@ -73,6 +76,9 @@ async def write_settings(
     # until every current session aged out.
     if previous_stream_shape != (
         settings.row.twitch_player_type,
+        settings.row.twitch_proxy_url,
+        settings.row.ad_block_strategy,
+        settings.row.ad_backup_low_quality,
         settings.row.strip_ads,
         settings.row.default_quality,
     ):

@@ -329,6 +329,62 @@ async def test_settings_player_type_round_trip(client: httpx.AsyncClient):
     assert (await client.get("/api/settings")).json()["twitch_player_type"] == "embed"
 
 
+async def test_ad_block_strategy_defaults_to_backup_stream(client: httpx.AsyncClient):
+    """Backup substitution is the default; the others stay selectable."""
+    await _complete_setup(client)
+
+    body = (await client.get("/api/settings")).json()
+    assert body["ad_block_strategy"] == "ttv_ab"
+    assert body["ad_backup_low_quality"] is True
+    assert body["ad_spoofing"] is True
+
+    switched = await client.put("/api/settings", json={"ad_block_strategy": "ttv_lol_pro"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["ad_block_strategy"] == "ttv_lol_pro"
+    assert (await client.get("/api/settings")).json()["ad_block_strategy"] == "ttv_lol_pro"
+
+
+async def test_an_unknown_ad_block_strategy_is_rejected(client: httpx.AsyncClient):
+    """A typo must not silently disable ad blocking."""
+    await _complete_setup(client)
+    bad = await client.put("/api/settings", json={"ad_block_strategy": "nope"})
+    assert bad.status_code == 422
+
+
+async def test_ad_proxy_defaults_on_and_can_be_switched_off(client: httpx.AsyncClient):
+    """Unset means default-on; explicitly empty is the off switch."""
+    await _complete_setup(client)
+
+    body = (await client.get("/api/settings")).json()
+    assert body["twitch_proxy_url"].startswith("http://")
+    assert body["twitch_proxy_active"] is True
+
+    off = await client.put("/api/settings", json={"twitch_proxy_url": ""})
+    assert off.status_code == 200, off.text
+    assert off.json()["twitch_proxy_url"] == ""
+    assert off.json()["twitch_proxy_active"] is False
+    # Persisted, not just echoed - an empty string must survive the writer's
+    # None-filter, or "off" would silently revert to the default on restart.
+    assert (await client.get("/api/settings")).json()["twitch_proxy_url"] == ""
+
+
+async def test_setting_a_user_token_disables_the_proxy(client: httpx.AsyncClient):
+    """A credential must never be routed through a third-party proxy.
+
+    Reported as inactive rather than silently ignored, so the UI can explain
+    why the configured proxy is doing nothing.
+    """
+    await _complete_setup(client)
+
+    updated = await client.put("/api/settings", json={"twitch_user_token": "oauth-secret"})
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+
+    assert body["twitch_user_token_set"] is True
+    assert body["twitch_proxy_active"] is False, "the proxy must stand down for a token"
+    assert "oauth-secret" not in str(body), "the token was echoed back"
+
+
 async def test_settings_recovers_from_null_columns_left_by_an_upgrade(
     client: httpx.AsyncClient,
 ):

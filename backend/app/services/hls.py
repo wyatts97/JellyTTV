@@ -36,23 +36,36 @@ AD_CLASS = "twitch-stitched-ad"
 AD_ID_PREFIX = "stitched-ad-"
 AD_ATTR_PREFIX = "X-TV-TWITCH-AD-"
 
+# Server-side ad insertion markers that are not Twitch-specific. Twitch emits
+# these on some breaks alongside (or instead of) its own daterange, so a rule
+# built only around `twitch-stitched-ad` misses them. Taken from TTV-AB's marker
+# set, which is the same list it has been catching real breaks with.
+_SSAI_MARKERS = ("SCTE35-OUT", "EXT-X-CUE-OUT")
+
+# Segment paths Twitch serves ad creatives from. A URL is enough on its own:
+# these never carry programme content, so no corroborating daterange is needed.
+_AD_URL_MARKERS = ("/adsquared/", "/_404/")
+
 # Dateranges that carry X-TV-TWITCH-* attributes but are not ad markers. Without
 # this, the "any X-TV-TWITCH-AD- attribute" rule over-matches and blanks the
 # stream.
 _NON_AD_CLASSES = {"twitch-trigger", "twitch-stream-source", "twitch-info"}
 
-# Twitch labels ad segments in the EXTINF title, and Amazon serves the ads. This
-# is the original, deliberately loose rule, applied with no daterange required
-# first - it is what catches a pod joined after its DATERANGE scrolled out.
+# Twitch labels ad segments in the EXTINF title. A bare `amazon` alternative
+# used to live here and was removed: segment titles carry the *stream* title, so
+# a channel called "Amazon haul unboxing" had every segment classified as
+# advertising, and under backup substitution that misfire is worse than it used
+# to be - it makes every poll kick off a pointless backup search.
 #
-# It is known to over-match: segment titles here carry the *stream* title, so a
-# channel called "Amazon haul unboxing" has every segment classified as an ad,
-# and with the session holding output that would freeze the channel outright.
-# The heuristic is therefore revocable rather than merely narrow - see
-# `trust_titles` below and `stream_session`'s hold guard, which switches it off
-# for a session once it has demonstrably misfired. Detection stays aggressive;
-# the blast radius is bounded by making a bad call self-correcting.
-_AD_TITLE_RE = re.compile(r"(amazon|stitched-ad|twitch-ad)", re.IGNORECASE)
+# TTV-AB, which handles these breaks reliably, does not match on "Amazon" at all
+# and instead reads `,live` as a *positive* content signal. The daterange rules
+# above are what actually catch stitched ads; this stays as a narrow assist for
+# a pod joined after its DATERANGE has scrolled out of the window.
+_AD_TITLE_RE = re.compile(r"(stitched-ad|twitch-ad)", re.IGNORECASE)
+
+# The inverse signal, from TTV-AB: Twitch tags real programme segments `,live`.
+# Used to hold the title heuristic back, never to classify something as an ad.
+CONTENT_TITLE_MARKER = "live"
 
 # How much content a daterange that announces *no* duration is allowed to eat.
 # Back to the original 240s. It was cut to 60s because a duration-less daterange
@@ -84,6 +97,32 @@ def parse_attributes(value: str) -> dict[str, str]:
     for key, raw in _ATTR_RE.findall(value):
         attrs[key.upper()] = raw.strip('"')
     return attrs
+
+
+def is_ad_segment_url(uri: str) -> bool:
+    """Is this segment URL itself an ad creative?
+
+    Enough on its own, with no corroborating daterange: Twitch never serves
+    programme content from these paths.
+    """
+    return any(marker in uri for marker in _AD_URL_MARKERS)
+
+
+def has_ad_markers(playlist: str) -> bool:
+    """Does this playlist body carry any ad marker at all?
+
+    A whole-body test used to accept or reject a *candidate* playlist, which is
+    a different question from "which segments are ads" - a backup stream has to
+    be clean everywhere to be worth switching to, so one marker anywhere
+    disqualifies it.
+    """
+    if AD_ID_PREFIX in playlist or AD_ATTR_PREFIX in playlist:
+        return True
+    if any(marker in playlist for marker in _SSAI_MARKERS):
+        return True
+    if any(marker in playlist for marker in _AD_URL_MARKERS):
+        return True
+    return f'CLASS="{AD_CLASS}"' in playlist
 
 
 def is_ad_daterange(attrs: dict[str, str]) -> bool:
@@ -291,6 +330,31 @@ def parse_media_playlist(
                         )
                 continue
 
+            if upper.startswith("#EXT-X-CUE-OUT") or "SCTE35-OUT" in upper:
+                # Generic server-side ad insertion, which Twitch emits on some
+                # breaks instead of its own daterange. CUE-OUT carries the pod
+                # length; CUE-IN closes it below.
+                if strip_ads:
+                    in_ad = True
+                    cue_duration = _float_attr(
+                        parse_attributes(line.split(":", 1)[1] if ":" in line else ""),
+                        "DURATION",
+                    )
+                    ad_known_duration = cue_duration is not None
+                    ad_remaining = (
+                        cue_duration
+                        if cue_duration is not None
+                        else _UNKNOWN_AD_WINDOW_SECONDS
+                    )
+                continue
+
+            if upper.startswith("#EXT-X-CUE-IN"):
+                in_ad = False
+                ad_remaining = 0.0
+                ad_known_duration = False
+                pending_discontinuity = True
+                continue
+
             if upper.startswith("#EXT-X-DISCONTINUITY"):
                 if in_ad:
                     in_ad = False
@@ -355,7 +419,12 @@ def parse_media_playlist(
         )
 
         if strip_ads:
-            if in_ad:
+            if is_ad_segment_url(segment.uri):
+                # The URL alone settles it - Twitch serves no programme content
+                # from these paths - so this outranks the in_ad state machine.
+                segment.is_ad = True
+                segment.ad_source = "url"
+            elif in_ad:
                 segment.is_ad = True
                 segment.ad_source = "daterange"
                 ad_remaining -= segment.duration or 2.0

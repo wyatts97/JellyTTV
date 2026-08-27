@@ -93,6 +93,23 @@ class Settings(SQLModel, table=True):
     # without a DEFAULT, so rows predating it read back NULL rather than the
     # default above; readers coerce through resolver.resolve_player_type.
     twitch_player_type: str | None = None
+    # HTTP proxy used only for the Twitch token/manifest requests, so the token
+    # is minted for a region that carries no ad inventory. Empty disables it.
+    # Ignored whenever twitch_user_token is set - a credential must never be
+    # routed through a third party. Defaults on; see resolver.DEFAULT_PROXY_URL.
+    twitch_proxy_url: str | None = None
+    # How ads are avoided. "ttv_ab" splices a clean backup stream over the
+    # break, "ttv_lol_pro" mints the token through an ad-free-region proxy,
+    # "strip_only" just removes ad segments. NULL means "never configured" and
+    # resolves to the default - see services.adblock.
+    ad_block_strategy: str | None = None
+    # Allow a lower-quality backup when nothing clean exists at the stream's own
+    # quality. TTV-AB's "Low Quality Fallback"; picture keeps moving at the cost
+    # of resolution for the length of the break.
+    ad_backup_low_quality: bool = True
+    # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
+    # watched that were not; separate from blocking and independently toggleable.
+    ad_spoofing: bool = True
     default_quality: str = "best"
     guide_window_hours: int = 48
 

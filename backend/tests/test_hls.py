@@ -276,21 +276,24 @@ def test_all_ads_falls_back_to_passthrough_rather_than_empty():
     assert result.segment_count > 0
 
 
-def test_loose_title_match_over_matches_a_stream_named_after_amazon():
-    """The known cost of the deliberately loose title rule, pinned down.
+def test_a_stream_named_after_amazon_is_not_advertising():
+    """The bare `amazon` title rule is gone, and this is why.
 
-    Segment titles here carry the *stream* title, so "Amazon haul unboxing"
-    matches on every segment and the whole channel reads as one endless advert.
-    This is accepted in exchange for catching pods whose DATERANGE has already
-    scrolled out - but only because it is revocable, which the next test covers.
-    Asserted on parsed `is_ad` flags rather than rendered output: checking
-    `removed_segments` hid this exact condition, because once every segment is
+    Segment titles carry the *stream* title, so "Amazon haul unboxing" matched
+    on every segment and the whole channel read as one endless advert. TTV-AB,
+    which handles real breaks reliably, never matches on "Amazon" - the
+    daterange rules are what actually catch stitched ads. Asserted on parsed
+    `is_ad` flags rather than rendered output, because checking
+    `removed_segments` hid this exact condition: once every segment is
     misclassified the never-empty fallback restores them all and the counts look
     perfectly healthy.
     """
     parsed = parse_media_playlist(MEDIA_AMAZON_IN_TITLE, BASE)
-    assert [s.is_ad for s in parsed.segments] == [True, True]
-    assert {s.ad_source for s in parsed.segments} == {"title"}
+    assert [s.is_ad for s in parsed.segments] == [False, False]
+
+    result = rewrite_playlist(MEDIA_AMAZON_IN_TITLE, BASE)
+    assert result.removed_segments == 0
+    assert result.segment_count == 2
 
 
 def test_titles_can_be_distrusted_so_the_over_match_is_recoverable():
