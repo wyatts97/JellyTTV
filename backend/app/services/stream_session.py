@@ -101,6 +101,47 @@ def _spawn_ad_report(report_ads: AdReporter, text: str) -> None:
     task = asyncio.create_task(report_ads(text))
     _ad_report_tasks.add(task)
     task.add_done_callback(_ad_report_tasks.discard)
+
+
+# Backup searches run detached from the poll that asked for one, so a slow
+# candidate can never hold a playlist response open. Same anti-GC set as above.
+_backup_tasks: set[asyncio.Task] = set()
+
+
+def _start_backup_search(session: StreamSession, backup: BackupFinder) -> None:
+    """Kick off one backup attempt in the background, if none is running."""
+    if session.backup_task is not None and not session.backup_task.done():
+        return
+    session.backup.searching = True
+    task = asyncio.create_task(backup(session.backup, session.quality))
+    session.backup_task = task
+    _backup_tasks.add(task)
+    task.add_done_callback(_backup_tasks.discard)
+
+
+def _take_backup_result(session: StreamSession) -> BackupCandidate | None:
+    """Collect a finished search, or None while one is still in flight."""
+    task = session.backup_task
+    if task is None or not task.done():
+        return None
+    session.backup_task = None
+    session.backup.searching = False
+    if task.cancelled():
+        return None
+    exc = task.exception()
+    if exc is not None:
+        log.warning("backup search failed", login=session.login, error=str(exc)[:200])
+        return None
+    return task.result()
+
+
+def _cancel_backup_search(session: StreamSession) -> None:
+    if session.backup_task is not None and not session.backup_task.done():
+        session.backup_task.cancel()
+    session.backup_task = None
+    session.backup.searching = False
+
+
 Fetcher = Callable[[str], Awaitable[tuple[int, str]]]
 UriRewriter = Callable[[str], str]
 
@@ -173,6 +214,7 @@ class StreamSession:
     # the real stream has looked clean, so we do not switch back on the gap
     # between two pods of the same break.
     backup: BackupState = field(default_factory=BackupState)
+    backup_task: asyncio.Task | None = field(default=None, repr=False)
     serving_backup: bool = False
     clean_native_polls: int = 0
 
@@ -234,6 +276,12 @@ class StreamSession:
             "backup_player_type": self.backup.active.player_type if self.backup.active else None,
             "backup_quality": self.backup.active.quality if self.backup.active else None,
             "clean_native_polls": self.clean_native_polls,
+            # A search that is still in flight, and what the last attempt cost.
+            # A rising `backup_last_attempt_s` is the tell for a slow player
+            # type; `backup_searching` stuck true means a search is wedged.
+            "backup_searching": self.backup.searching,
+            "backup_last_attempt_s": self.backup.last_attempt_seconds,
+            "backup_exhausted": self.backup.exhausted_until > time.monotonic(),
             "stats": vars(self.stats),
         }
 
@@ -380,6 +428,25 @@ def _advance(
     removed = len(parsed.segments) - len(kept)
 
     ad_pod = bool(strip_ads and parsed.segments and not kept)
+    if ad_pod and session.next_seq == 0:
+        # Nothing has ever been handed out, so an empty playlist would be the
+        # very first thing the player sees - and ffmpeg cannot probe a playlist
+        # with no segments, so it fails outright instead of waiting the pod out.
+        # (A more patient player, like iOS AVPlayer, keeps polling and recovers -
+        # which is exactly why a channel with a preroll played in Streamyfin and
+        # not in the Jellyfin web UI.) The rule `hls.rewrite_playlist` already
+        # applies holds here: an unstripped ad is merely annoying, an empty
+        # playlist is fatal. Pass this one pod through; stripping resumes on the
+        # next poll, by which point the session has a window to hold instead.
+        log.info(
+            "ad pod at session start - passing it through rather than serving nothing",
+            login=session.login,
+            segments=len(parsed.segments),
+        )
+        kept = list(parsed.segments)
+        removed = 0
+        ad_pod = False
+
     if ad_pod:
         # Every segment upstream is advertising, so nothing is served - the
         # caller renders a headers-only playlist, which is exactly what the
@@ -467,16 +534,22 @@ async def _apply_backup(
             )
             session.serving_backup = False
             session.clean_native_polls = 0
+            _cancel_backup_search(session)
             session.backup.clear()
             session.pending_discontinuity = True
         return False
 
     session.clean_native_polls = 0
     if session.backup.active is None:
-        candidate = await backup(session.backup, session.quality)
+        # Never awaited inline: a search resolves through streamlink, and doing
+        # that while the client waits for this playlist is what made an ad break
+        # look like a dead channel. Start one, serve what we can now, and pick
+        # the result up on a later poll.
+        candidate = _take_backup_result(session)
         if candidate is None:
-            # Every player type is carrying the ad. Fall back to emitting
-            # nothing, which is what this did before backups existed.
+            _start_backup_search(session, backup)
+            # No backup yet, so this poll still emits nothing - but it returns
+            # immediately instead of holding the request open.
             return True
         session.backup.active = candidate
         session.serving_backup = True
@@ -793,12 +866,25 @@ def get(login: str, quality: str, variant: str | None = None) -> StreamSession |
     return _sessions.get(session_key(login, quality, variant))
 
 
+async def ensure(login: str, quality: str, variant: str | None = None) -> StreamSession:
+    """Get the session for this key, creating it if it does not exist yet.
+
+    Lets a caller record something on the session (notably `is_master`) before
+    the first playlist has been served through it.
+    """
+    return await _get_or_create(session_key(login, quality, variant), login, quality)
+
+
 def drop(login: str, quality: str, variant: str | None = None) -> None:
-    _sessions.pop(session_key(login, quality, variant), None)
+    session = _sessions.pop(session_key(login, quality, variant), None)
+    if session is not None:
+        _cancel_backup_search(session)
 
 
 def reset() -> None:
     """Drop every session. Used by tests and by settings changes."""
+    for session in _sessions.values():
+        _cancel_backup_search(session)
     _sessions.clear()
 
 
@@ -815,7 +901,9 @@ def sweep(now: float | None = None) -> int:
         or now - s.created_at > SESSION_MAX_SECONDS
     ]
     for key in dead:
-        _sessions.pop(key, None)
+        session = _sessions.pop(key, None)
+        if session is not None:
+            _cancel_backup_search(session)
     if dead:
         log.debug("swept idle stream sessions", count=len(dead))
     return len(dead)

@@ -28,7 +28,7 @@ from app.services import http as shared_http
 from app.services import stream_session
 from app.services.events import close_redis
 from app.services.settings_store import get_settings_row
-from app.worker.queue import close_pool, enqueue
+from app.worker.queue import close_pool, coalesced_job_id, enqueue
 
 log = get_logger(__name__)
 cfg = get_config()
@@ -49,7 +49,11 @@ async def lifespan(app: FastAPI):
             eventsub=row.eventsub_enabled,
         )
     # Nudge the worker so subscriptions/library state converge after a restart.
-    await enqueue("reconcile_eventsub", job_id="reconcile_eventsub", defer_seconds=15)
+    await enqueue(
+        "reconcile_eventsub",
+        job_id=coalesced_job_id("reconcile_eventsub", window=60),
+        defer_seconds=15,
+    )
     sweeper = asyncio.create_task(stream_session.sweeper_task())
     try:
         yield

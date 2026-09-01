@@ -9,6 +9,9 @@ maps channels to guide data automatically.
 
 Offline channels are kept in the playlist by default: Jellyfin keys channels by
 id, and removing/re-adding them churns its database and loses user favourites.
+They get a `<channel>` entry but no programmes, so they never appear in "On Now";
+the note above `_stream_url` explains why that is the encoding rather than a
+placeholder.
 """
 
 from __future__ import annotations
@@ -20,14 +23,21 @@ from urllib.parse import quote
 from app.models import Channel
 from app.util import twitch_thumbnail, utcnow, xmltv_time
 
-OFFLINE_PROGRAMME_TITLE = "Offline"
-
-# Offline placeholders start this far in the future, never at "now": Jellyfin
-# treats any programme covering the current time as "on now" regardless of
-# title, so a gap has to exist at the current moment. This buffer must stay
-# comfortably above the guide refresh cadence (worker cron, ~10 min) so the
-# gap is always still ahead of "now" by the time Jellyfin re-fetches.
-OFFLINE_GAP = timedelta(minutes=20)
+# A channel that is not live gets no programmes at all.
+#
+# There used to be "Offline" placeholder blocks filling the guide window, kept
+# clear of the present by a gap of a few minutes so Jellyfin's "On Now" - which
+# treats any programme covering the current time as airing, whatever its title -
+# would show nothing for them. That gap could only ever be a race: it is fixed at
+# generation time, so it closes as soon as wall-clock time catches up, and an
+# offline channel that simply stays offline produces no state change to force a
+# fresh guide that would re-open it. The result was rows of "Offline" cards in
+# On Now, which is precisely what the placeholders existed to prevent.
+#
+# Emitting nothing is not a workaround for that, it is the honest encoding: there
+# is no programme, so the guide says there is no programme. The `<channel>` entry
+# and the M3U line both remain, so the channel keeps its place (and its Jellyfin
+# id, and any favourite) in the Channels list either way.
 
 
 def _stream_url(base_url: str, channel: Channel, token: str | None) -> str:
@@ -112,47 +122,28 @@ def build_xmltv(
 
 
 def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> None:
-    cursor = now - timedelta(hours=1)
+    if not channel.is_live:
+        # Nothing to announce - see the note at the top of this module. A channel
+        # only earns a place in "On Now" by actually being on.
+        return
 
-    if channel.is_live:
-        # A live broadcast has no known end time. Give it a rolling 4h block and
-        # keep filling the rest of the window with placeholders so the Jellyfin
-        # guide is never empty (an empty guide hides the channel in some clients).
-        live_start = channel.live_started_at or now
-        live_start = min(live_start, cursor)
-        live_end = min(window_end, now + timedelta(hours=4))
-        _programme(
-            root,
-            channel,
-            start=live_start,
-            stop=live_end,
-            title=channel.live_title or f"{channel.display_name} live",
-            description=_live_description(channel),
-            category=channel.live_game,
-            icon=twitch_thumbnail(channel.live_thumbnail_url),
-            live=True,
-        )
-        cursor = live_end
-    else:
-        # Leave a gap at "now" (see OFFLINE_GAP) so Jellyfin's "On Now" widget,
-        # which just looks for a programme covering the current time, correctly
-        # shows nothing for a channel that isn't actually live.
-        cursor = now + OFFLINE_GAP
-
-    while cursor < window_end:
-        stop = min(cursor + timedelta(hours=4), window_end)
-        _programme(
-            root,
-            channel,
-            start=cursor,
-            stop=stop,
-            title=OFFLINE_PROGRAMME_TITLE,
-            description=f"{channel.display_name} is not streaming right now.",
-            category=None,
-            icon=channel.offline_image_url,
-            live=False,
-        )
-        cursor = stop
+    # A live broadcast has no known end time, so it gets a rolling block that
+    # each guide refresh extends. Nothing follows it: a placeholder after the
+    # block would become "on now" the moment the block ran out.
+    live_start = channel.live_started_at or now
+    live_start = min(live_start, now - timedelta(hours=1))
+    live_end = min(window_end, now + timedelta(hours=4))
+    _programme(
+        root,
+        channel,
+        start=live_start,
+        stop=live_end,
+        title=channel.live_title or f"{channel.display_name} live",
+        description=_live_description(channel),
+        category=channel.live_game,
+        icon=twitch_thumbnail(channel.live_thumbnail_url),
+        live=True,
+    )
 
 
 def _live_description(channel: Channel) -> str:

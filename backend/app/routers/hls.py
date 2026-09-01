@@ -12,6 +12,7 @@ hidden behind it, so Jellyfin never gets a dead playlist mid-session.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -36,6 +37,13 @@ log = get_logger(__name__)
 router = APIRouter(tags=["stream"], dependencies=[Depends(require_tuner_token)])
 
 PLAYLIST_MEDIA_TYPE = "application/vnd.apple.mpegurl"
+
+# Hard ceiling on how long a client may be kept waiting for a playlist. ffmpeg -
+# which is what the Jellyfin web client is really driving - abandons a live
+# stream that answers slowly, so a late playlist is worse than a stale one. The
+# session already avoids blocking (its backup search is detached), and this is
+# the backstop that keeps any future work on that path from regressing it.
+PLAYLIST_DEADLINE_SECONDS = 6.0
 NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
 
 ALLOWED_UPSTREAM_SUFFIXES = (
@@ -238,11 +246,16 @@ async def master_playlist(
     # streamlink hands back a single variant, so this endpoint almost always
     # serves a *media* playlist despite its name. Check once per session and
     # remember, rather than re-fetching to re-decide on every poll.
-    existing = stream_session.get(login, quality)
-    if existing is None or existing.is_master is None:
+    existing = await stream_session.ensure(login, quality)
+    if existing.is_master is not False:
         upstream = await resolve()
         probe = await _fetch_text(upstream)
-        if hls.is_master_playlist(probe):
+        # Recorded either way. Leaving it None on a master (which is what used
+        # to happen - only `_session_playlist` ever wrote the flag, and only
+        # False) meant a master-serving channel re-probed on every single
+        # request, and any non-200 on that probe became a hard 502.
+        existing.is_master = hls.is_master_playlist(probe)
+        if existing.is_master:
             def to_media(variant_url: str) -> str:
                 return (
                     f"{base}/hls/{quote(login)}/media.m3u8"
@@ -274,19 +287,41 @@ async def _session_playlist(
 ) -> Response:
     """Serve a media playlist through the stateful session."""
     try:
-        render = await stream_session.get_playlist(
-            login=login,
-            quality=quality,
-            strip_ads=settings.row.strip_ads,
-            resolve=resolve,
-            fetch=_fetch_playlist,
-            rewrite_uri=_segment_rewriter(
-                base, login, key_suffix, settings.row.proxy_segments
+        render = await asyncio.wait_for(
+            stream_session.get_playlist(
+                login=login,
+                quality=quality,
+                strip_ads=settings.row.strip_ads,
+                resolve=resolve,
+                fetch=_fetch_playlist,
+                rewrite_uri=_segment_rewriter(
+                    base, login, key_suffix, settings.row.proxy_segments
+                ),
+                variant=variant,
+                backup=_make_backup_finder(login, settings),
+                report_ads=_make_ad_reporter(settings),
             ),
-            variant=variant,
-            backup=_make_backup_finder(login, settings),
-            report_ads=_make_ad_reporter(settings),
+            timeout=PLAYLIST_DEADLINE_SECONDS,
         )
+    except TimeoutError:
+        # Re-serving the last playlist is legal HLS and reads as "nothing new
+        # yet", which is far better than making the client wait any longer.
+        stale = stream_session.get(login, quality, variant)
+        log.warning(
+            "playlist render exceeded its deadline",
+            login=login,
+            seconds=PLAYLIST_DEADLINE_SECONDS,
+            served_stale=bool(stale and stale.last_rendered),
+        )
+        if stale is not None and stale.last_rendered:
+            return Response(
+                stale.last_rendered, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE
+            )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="playlist timed out",
+            headers={"Retry-After": "1"},
+        ) from None
     except stream_session.SessionError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -358,7 +393,10 @@ async def segment(
         return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
 
     # A client pulling segments is alive even if a playlist poll runs late.
-    stream_session.touch(login, settings.row.default_quality or "best")
+    # Must use the channel's own quality, not the global default: they are
+    # different session keys, and touching the wrong one let a session with a
+    # per-channel quality override get swept out from under a live client.
+    stream_session.touch(login, await _channel_quality(session, settings, login))
 
     client = shared_http.get_client()
     try:

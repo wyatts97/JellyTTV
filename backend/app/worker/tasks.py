@@ -7,6 +7,7 @@ ids rather than objects, re-read state from the database, and are idempotent.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -34,11 +35,29 @@ from app.services import library, notifications, vods
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings
 from app.util import utcnow
-from app.worker.queue import enqueue
+from app.worker.queue import coalesced_job_id, enqueue
 
 log = get_logger(__name__)
 
 _download_semaphore: asyncio.Semaphore | None = None
+
+# Bypassing Jellyfin's guide cache costs a listings-provider recreate, and each
+# one orphans the previous `<guid>.xml` in Jellyfin's cache directory (Jellyfin
+# never cleans those up). So it is rate-limited: reactive refreshes still land
+# within a few minutes of a channel changing state, without churning provider
+# ids every time a poll notices something.
+FORCED_GUIDE_REFRESH_MIN_INTERVAL = 180.0
+_last_forced_guide_refresh = float("-inf")
+
+
+def _claim_forced_guide_refresh() -> bool:
+    """Take the rate-limit budget for a provider recreate, if it is available."""
+    global _last_forced_guide_refresh
+    now = time.monotonic()
+    if now - _last_forced_guide_refresh < FORCED_GUIDE_REFRESH_MIN_INTERVAL:
+        return False
+    _last_forced_guide_refresh = now
+    return True
 
 
 def _semaphore() -> asyncio.Semaphore:
@@ -213,7 +232,7 @@ async def poll_live(ctx: dict[str, Any]) -> dict[str, bool]:
         await event_bus.publish("channels.changed", {})
         await enqueue(
             "jellyfin_refresh_guide",
-            job_id="jellyfin_refresh_guide",
+            job_id=coalesced_job_id("jellyfin_refresh_guide"),
             defer_seconds=5,
         )
     return changed
@@ -232,7 +251,11 @@ async def handle_stream_online(ctx: dict[str, Any], channel_id: int) -> None:
         stream_id = await _current_stream_id(session, channel_id)
 
     await event_bus.publish("channels.changed", {})
-    await enqueue("jellyfin_refresh_guide", job_id="jellyfin_refresh_guide", defer_seconds=5)
+    await enqueue(
+        "jellyfin_refresh_guide",
+        job_id=coalesced_job_id("jellyfin_refresh_guide"),
+        defer_seconds=5,
+    )
     if went_live:
         await _enqueue_live_notification(channel_id, stream_id)
 
@@ -245,7 +268,11 @@ async def handle_stream_offline(ctx: dict[str, Any], channel_id: int) -> None:
         await channel_service.mark_offline(session, channel)
         mode = channel.vod_mode
     await event_bus.publish("channels.changed", {})
-    await enqueue("jellyfin_refresh_guide", job_id="jellyfin_refresh_guide", defer_seconds=5)
+    await enqueue(
+        "jellyfin_refresh_guide",
+        job_id=coalesced_job_id("jellyfin_refresh_guide"),
+        defer_seconds=5,
+    )
     if mode is not VodMode.off:
         await enqueue(
             "sync_vods", channel_id, job_id=f"sync_vods:{channel_id}:offline", defer_seconds=900
@@ -376,7 +403,11 @@ async def publish_channel(ctx: dict[str, Any], channel_id: int) -> dict[str, Any
         {"channel_id": channel_id, **library.build_publish_report(stats)},
     )
     if auto_refresh:
-        await enqueue("jellyfin_refresh", job_id="jellyfin_refresh", defer_seconds=60)
+        await enqueue(
+            "jellyfin_refresh",
+            job_id=coalesced_job_id("jellyfin_refresh", window=60),
+            defer_seconds=60,
+        )
     return library.build_publish_report(stats)
 
 
@@ -420,11 +451,15 @@ async def jellyfin_refresh(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 async def jellyfin_refresh_guide(ctx: dict[str, Any]) -> dict[str, Any]:
-    """Trigger Jellyfin's 'Refresh Guide' scheduled task.
+    """Make Jellyfin's Live TV guide reflect current live/offline state.
 
-    This forces Jellyfin to re-download the XMLTV file and update Live TV
-    programme data, so go-live / go-offline changes appear immediately
-    instead of waiting for Jellyfin's default 24h refresh interval.
+    Triggering Jellyfin's "Refresh Guide" task is on its own not enough:
+    Jellyfin caches the downloaded XMLTV on disk for an hour, keyed by the
+    listings provider's id, so a refresh inside that hour re-parses the stale
+    copy no matter what cache headers we send. `force_guide_refresh` recreates
+    the provider to change that key, which is the only way to get a genuinely
+    fresh guide from outside the Jellyfin host. It is rate-limited and falls
+    back to the plain task trigger.
     """
     async with job_record("jellyfin_refresh_guide") as job:
         async with session_scope() as session:
@@ -434,15 +469,28 @@ async def jellyfin_refresh_guide(ctx: dict[str, Any]) -> dict[str, Any]:
                 return {"skipped": True}
             base = settings.row.jellyfin_url or ""
             key = settings.jellyfin_api_key or ""
+            want_force = settings.row.jellyfin_force_guide_refresh
+            guide_url = f"{settings.self_base_url}/tuner/guide.xml"
+
+        forced = False
         try:
             async with JellyfinClient(base, key) as client:
-                await client.refresh_guide()
+                if want_force and _claim_forced_guide_refresh():
+                    forced = await client.force_guide_refresh(guide_url)
+                if not forced:
+                    # Still worth doing: it is what picks up a change once the
+                    # cached copy has aged out on its own.
+                    await client.refresh_guide()
         except JellyfinError as exc:
             job.message = str(exc)
             raise
-        job.message = "guide refresh triggered"
-    await event_bus.publish("jellyfin.guide_refreshed", {})
-    return {"ok": True}
+        job.message = (
+            "guide refresh triggered (cache bypassed)"
+            if forced
+            else "guide refresh triggered"
+        )
+    await event_bus.publish("jellyfin.guide_refreshed", {"forced": forced})
+    return {"ok": True, "forced": forced}
 
 
 # ------------------------------------------------------------------- maintenance

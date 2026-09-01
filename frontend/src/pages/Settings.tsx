@@ -273,6 +273,12 @@ export default function Settings() {
             label="Refresh Jellyfin automatically"
             description="Debounced by 60 seconds after a library write."
           />
+          <Toggle
+            checked={Boolean(get('jellyfin_force_guide_refresh'))}
+            onChange={(v) => set('jellyfin_force_guide_refresh', v)}
+            label="Force guide updates through Jellyfin's cache"
+            description="Jellyfin caches the downloaded guide for an hour, so live/offline changes are otherwise up to an hour late. Recreates the XMLTV listings provider to get past it."
+          />
         </CardBody>
       </Card>
 

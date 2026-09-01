@@ -69,6 +69,11 @@ class Settings(SQLModel, table=True):
     jellyfin_api_key_enc: str | None = None
     jellyfin_shows_library_id: str | None = None
     jellyfin_auto_refresh: bool = True
+    # Recreate the XMLTV listings provider when the guide must actually change.
+    # Jellyfin caches the downloaded guide on disk for an hour keyed by the
+    # provider's id, so triggering its "Refresh Guide" task any more often than
+    # that just re-parses the stale copy - see `JellyfinClient.force_guide_refresh`.
+    jellyfin_force_guide_refresh: bool = True
 
     # Go-live push notifications, delivered via the Streamyfin companion plugin
     # (Jellyfin's own web PWA cannot receive push at all).

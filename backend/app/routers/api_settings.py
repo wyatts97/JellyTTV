@@ -15,7 +15,7 @@ from app.services import notifications, resolver, stream_session
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings, get_settings_row, update_settings
 from app.services.twitch import TwitchClient, TwitchError
-from app.worker.queue import enqueue
+from app.worker.queue import coalesced_job_id, enqueue
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["settings"])
@@ -62,7 +62,10 @@ async def write_settings(
         settings.eventsub_callback_url() != previous_callback
     ):
         if settings.row.eventsub_enabled:
-            await enqueue("reconcile_eventsub", job_id="reconcile_eventsub")
+            await enqueue(
+                "reconcile_eventsub",
+                job_id=coalesced_job_id("reconcile_eventsub", window=60),
+            )
         else:
             try:
                 removed = await eventsub_service.teardown_subscriptions(before)
@@ -91,7 +94,7 @@ async def write_settings(
 
     # Base url or token changes invalidate every .strm file we wrote.
     if {"self_base_url", "public_base_url"} & values.keys():
-        await enqueue("publish_all", job_id="publish_all")
+        await enqueue("publish_all", job_id=coalesced_job_id("publish_all", window=60))
 
     return settings_out(settings.row, resolved=settings)
 

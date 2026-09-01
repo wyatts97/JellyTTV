@@ -49,6 +49,34 @@ Common causes: outdated streamlink/yt-dlp after a Twitch backend change (`docker
 docker compose up -d`), subscriber-only content (add a user OAuth token in Settings), or the host
 being geo/IP-blocked by Twitch.
 
+## One channel works in Streamyfin but not in the Jellyfin web UI
+
+Almost always an ad difference between the two channels, not a client difference.
+A Twitch user OAuth token only yields an ad-free playlist for channels the account
+is **subscribed** to (or everywhere, with Turbo); every other channel still gets
+ads stitched in. Streamyfin plays the HLS URL natively and keeps retrying a
+playlist, while the web UI is driven by ffmpeg on the Jellyfin server, which gives
+up quickly — so a channel that hiccups during an ad break fails there first.
+
+Confirm it by comparing a working and a failing channel while both are live:
+
+```bash
+curl -s "http://localhost:8730/api/debug/hls/FAILING?fmt=json" | jq '.upstream, .result'
+```
+
+`upstream.ad_segments > 0` with `result.ad_pod: true` means the channel is in a
+break. Then time the endpoint itself — it must answer promptly even mid-break:
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{time_total}
+'   "http://localhost:8730/hls/FAILING/master.m3u8?key=YOUR_KEY"
+```
+
+Anything above a couple of seconds is a bug: the backup-stream search runs
+detached from the request and `PLAYLIST_DEADLINE_SECONDS` caps the handler. Check
+`GET /api/debug/hls/sessions` for `backup_searching` stuck true or a large
+`backup_last_attempt_s`.
+
 ## A channel stutters, pauses, or dies after a few minutes
 
 Almost always a playlist-continuity problem, and it only shows up on channels
@@ -86,6 +114,36 @@ Add `?refresh=1` to force a fresh streamlink resolve and start a new session.
   `backend/tests/test_hls.py`.
 - Adding a **user OAuth token** (Settings → Twitch) significantly reduces the ads Twitch serves in
   the first place, and unlocks 1440p/H.265.
+
+## The guide is stale — live/offline changes take ages to appear
+
+Jellyfin caches the downloaded XMLTV file on disk for **one hour**, at
+`<cache>/xmltv/<listings-provider-id>.xml`, keyed by the provider's id and expired
+purely by file age. No `Cache-Control` header we send affects it, and running
+Jellyfin's own "Refresh Guide" task inside that hour just re-parses the stale
+copy. That, on its own, is a guide that is up to an hour behind at an arbitrary
+phase.
+
+JellyTTV works around it by recreating the XMLTV listings provider, which changes
+the id and therefore the cache filename — see `JellyfinClient.force_guide_refresh`.
+It is controlled by **Force guide updates through Jellyfin's cache** in Settings
+(on by default) and rate-limited to once every few minutes, because each recreate
+leaves the previous `<guid>.xml` behind in Jellyfin's cache directory.
+
+If the guide still looks stale:
+
+- Check `GET /api/jobs` for `jellyfin_refresh_guide`. `guide refresh triggered
+  (cache bypassed)` is the forced path; plain `guide refresh triggered` means it
+  fell back — usually because no listings provider matches `self_base_url` +
+  `/tuner/guide.xml`. Make sure **Base URL for Jellyfin** matches the URL you
+  actually entered as the XMLTV provider in Jellyfin.
+- `could not reach Jellyfin` / `rejected the API key` means the API key is not an
+  admin key; recreating a listings provider requires elevation.
+- Offline channels deliberately have **no programmes at all**, so Jellyfin's
+  "On Now" cannot show them; they still appear under Channels. A blank guide row
+  for a channel that is not streaming is working as intended. If you do see
+  "Offline" cards in On Now, Jellyfin is serving guide data from before this
+  behaviour changed - force a refresh and they will clear.
 
 ## No episodes show up
 

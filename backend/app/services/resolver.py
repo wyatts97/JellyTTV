@@ -21,6 +21,14 @@ log = get_logger(__name__)
 STREAMLINK_BIN = "streamlink"
 YTDLP_BIN = "yt-dlp"
 
+# How long a single resolver subprocess may run. The default is generous
+# because a normal resolve happens once per session and a slow answer still
+# beats no stream. Callers on a latency-critical path - the ad-backup search,
+# which runs while a client is waiting for a playlist - pass something much
+# shorter: there, a slow candidate is worse than no candidate.
+DEFAULT_RESOLVE_TIMEOUT = 45.0
+BACKUP_RESOLVE_TIMEOUT = 8.0
+
 # Twitch decides whether to stitch ads into the playlist partly from the
 # `playerType` sent with the access-token request. Asking for a non-default
 # player type is the only thing that stops ads *upstream* - once they are
@@ -120,7 +128,7 @@ def invalidate(key: str | None = None) -> None:
         _cache.pop(key, None)
 
 
-async def _run(cmd: list[str], *, timeout: float = 45.0) -> tuple[int, str, str]:
+async def _run(cmd: list[str], *, timeout: float = DEFAULT_RESOLVE_TIMEOUT) -> tuple[int, str, str]:
     log.debug("running resolver command", cmd=" ".join(cmd[:3]) + " ...")
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -243,6 +251,7 @@ async def _resolve(
     user_token: str | None,
     player_type: str | None = None,
     proxy_url: str | None = None,
+    timeout: float = DEFAULT_RESOLVE_TIMEOUT,
 ) -> str:
     errors: list[str] = []
 
@@ -258,7 +267,8 @@ async def _resolve(
 
         for attempt, proxy in enumerate(attempts):
             code, out, err = await _run(
-                _streamlink_cmd(url, quality, user_token, player_type, proxy)
+                _streamlink_cmd(url, quality, user_token, player_type, proxy),
+                timeout=timeout,
             )
             if code == 0 and out.startswith("http"):
                 return out.splitlines()[0].strip()
@@ -279,7 +289,7 @@ async def _resolve(
         errors.append("streamlink: binary not found")
 
     if shutil.which(YTDLP_BIN):
-        code, out, err = await _run(_ytdlp_cmd(url, quality))
+        code, out, err = await _run(_ytdlp_cmd(url, quality), timeout=timeout)
         if code == 0 and out.startswith("http"):
             return out.splitlines()[0].strip()
         combined = f"{err}\n{out}".strip()
@@ -302,6 +312,7 @@ async def _resolve_cached(
     force: bool = False,
     player_type: str | None = None,
     proxy_url: str | None = None,
+    timeout: float = DEFAULT_RESOLVE_TIMEOUT,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
@@ -313,7 +324,9 @@ async def _resolve_cached(
         now = time.time()
         if entry and entry.expires_at > now and not force:
             return entry.url
-        resolved = await _resolve(url, quality, user_token, player_type, proxy_url)
+        resolved = await _resolve(
+            url, quality, user_token, player_type, proxy_url, timeout
+        )
         _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
         return resolved
 
@@ -349,6 +362,7 @@ async def resolve_live(
     force: bool = False,
     player_type: str | None = None,
     proxy_url: str | None = None,
+    timeout: float = DEFAULT_RESOLVE_TIMEOUT,
 ) -> str:
     """Return the upstream media-playlist url for a live channel.
 
@@ -372,6 +386,7 @@ async def resolve_live(
         force=force,
         player_type=player_type,
         proxy_url=proxy_url,
+        timeout=timeout,
     )
 
 

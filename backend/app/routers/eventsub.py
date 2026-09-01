@@ -22,7 +22,7 @@ from app.services import events as event_bus
 from app.services import eventsub as eventsub_service
 from app.services.settings_store import get_settings
 from app.util import utcnow
-from app.worker.queue import enqueue
+from app.worker.queue import coalesced_job_id, enqueue
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/eventsub", tags=["eventsub"])
@@ -140,6 +140,14 @@ async def callback(
                 "title": event.get("title"),
                 "category": event.get("category_name"),
             },
+        )
+        # The programme title and category in the guide come straight off these
+        # fields, so a title change is a guide change. Without this the only
+        # thing propagating it was the ten-minute cron.
+        await enqueue(
+            "jellyfin_refresh_guide",
+            job_id=coalesced_job_id("jellyfin_refresh_guide"),
+            defer_seconds=5,
         )
     else:
         log.debug("unhandled eventsub type", type=sub_type)

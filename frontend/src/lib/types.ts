@@ -31,6 +31,7 @@ export interface Settings {
   jellyfin_api_key_set: boolean
   jellyfin_shows_library_id: string | null
   jellyfin_auto_refresh: boolean
+  jellyfin_force_guide_refresh: boolean
   notify_on_live: boolean
   notify_title_template: string
   notify_body_template: string

@@ -11,6 +11,9 @@ Endpoints used:
   GET  /Items?...              - locate our series items by name
   GET  /ScheduledTasks         - resolve the "Refresh Guide" task's id
   POST /ScheduledTasks/Running/{taskId} - trigger the Live TV guide refresh
+  GET  /System/Configuration/livetv     - read the XMLTV listings providers
+  POST /LiveTv/ListingProviders         - (re)create a listings provider
+  DELETE /LiveTv/ListingProviders       - remove one
 """
 
 from __future__ import annotations
@@ -200,6 +203,77 @@ class JellyfinClient:
                 "POST", f"/ScheduledTasks/Running/{self._refresh_guide_task_id}"
             )
         log.info("triggered jellyfin guide refresh")
+
+    async def _listing_providers(self) -> list[dict[str, Any]]:
+        config = await self._request("GET", "/System/Configuration/livetv") or {}
+        return list(config.get("ListingProviders") or [])
+
+    def _matches_guide(self, provider: dict[str, Any], guide_url: str) -> bool:
+        """Is this the XMLTV provider pointed at our guide endpoint?
+
+        Compared on the path with its query stripped, because the stored value
+        carries the tuner token and ours may have been rotated since.
+        """
+        path = str(provider.get("Path") or provider.get("Url") or "")
+        return path.split("?", 1)[0] == guide_url.split("?", 1)[0]
+
+    async def force_guide_refresh(self, guide_url: str) -> bool:
+        """Make Jellyfin genuinely re-download the guide, not re-read its cache.
+
+        `XmlTvListingsProvider` caches the downloaded XMLTV at
+        `<cache>/xmltv/<ListingsProviderInfo.Id>.xml` and reuses it for
+        `_maxCacheAge` - one hour - regardless of what cache headers we send.
+        Running the "Refresh Guide" task inside that hour therefore re-parses the
+        *stale* file, which is why a channel going live or ending could take up
+        to an hour to show up, at an arbitrary phase.
+
+        `SaveListingProvider` mints a fresh `Guid.NewGuid()` whenever the posted
+        Id is blank, and then queues the guide refresh itself. A new id means a
+        new cache filename, so the download cannot be served from cache.
+
+        The new provider is added *before* the old one is deleted: a failure
+        halfway then leaves Live TV with a working provider rather than none.
+        Re-posting the whole object preserves `EnabledTuners` and
+        `ChannelMappings`.
+
+        Returns False when no matching provider was found, so the caller can
+        fall back to the ordinary refresh.
+        """
+        providers = await self._listing_providers()
+        existing = next(
+            (p for p in providers if self._matches_guide(p, guide_url)), None
+        )
+        if existing is None:
+            log.warning(
+                "no xmltv listings provider matches our guide url; "
+                "cannot bypass Jellyfin's guide cache",
+                guide_url=guide_url.split("?", 1)[0],
+            )
+            return False
+
+        old_id = str(existing.get("Id") or "")
+        replacement = {**existing, "Id": ""}
+        await self._request(
+            "POST",
+            "/LiveTv/ListingProviders",
+            params={"validateListings": "false", "validateLogin": "false"},
+            json_body=replacement,
+        )
+        if old_id:
+            try:
+                await self._request(
+                    "DELETE", "/LiveTv/ListingProviders", params={"id": old_id}
+                )
+            except JellyfinError as exc:
+                # The refresh is already queued against the new provider, so the
+                # guide is correct; we have merely left a duplicate behind.
+                log.warning(
+                    "could not remove the previous listings provider",
+                    provider_id=old_id,
+                    error=str(exc),
+                )
+        log.info("recreated the xmltv listings provider to bypass Jellyfin's guide cache")
+        return True
 
     async def send_notification(
         self, *, title: str, body: str, subtitle: str | None = None

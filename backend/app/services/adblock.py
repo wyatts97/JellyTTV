@@ -64,6 +64,12 @@ COOLDOWNS = {
     "error": 1.5,
 }
 
+# How long to stop searching entirely after a full rotation found nothing clean.
+# Without this the search restarted on the very next poll - `active` stays None
+# when nothing was found - so a break where every player type carries the ad
+# meant a continuous stream of streamlink spawns for the length of the pod.
+EXHAUSTED_COOLDOWN = 30.0
+
 # Consecutive clean polls of the native stream before switching back. Matches
 # TTV-AB's AD_END_MIN_CLEAN_PLAYLISTS: one clean poll is routinely a gap between
 # two pods rather than the end of the break.
@@ -89,6 +95,16 @@ class BackupState:
     searching: bool = False
     searches: int = 0
 
+    # Remaining (quality, player_type) pairs in the current search round. The
+    # rotation is walked one attempt per call rather than in a single nested
+    # loop - see `find_backup` for why.
+    plan: list[tuple[str, str]] = field(default_factory=list)
+    # Set when a whole rotation came back with nothing clean; no new search
+    # starts before this.
+    exhausted_until: float = 0.0
+    # Cost of the last attempt, surfaced in the debug snapshot.
+    last_attempt_seconds: float = 0.0
+
     def available_types(self, exclude: str | None, now: float) -> list[str]:
         """Player types worth trying, in TTV-AB's order, minus the native one."""
         return [
@@ -107,6 +123,25 @@ class BackupState:
 
     def clear(self) -> None:
         self.active = None
+
+    def build_plan(
+        self,
+        *,
+        native_player_type: str | None,
+        quality: str,
+        allow_low_quality: bool,
+        now: float,
+    ) -> list[tuple[str, str]]:
+        """Order the rotation: every player type at the stream's own quality
+        before any quality is given up, which is what keeps a break costing
+        resolution only when it has to."""
+        types = self.available_types(native_player_type, now)
+        if not types:
+            return []
+        qualities = [quality]
+        if allow_low_quality:
+            qualities += [q for q in FALLBACK_QUALITIES if q != quality]
+        return [(q, pt) for q in qualities for pt in types]
 
 
 def is_playable(playlist: str) -> bool:
@@ -148,83 +183,130 @@ async def find_backup(
     user_token: str | None = None,
     allow_low_quality: bool = True,
 ) -> BackupCandidate | None:
-    """Search player types for one serving a clean playlist for this channel.
+    """Try **one** backup candidate. Call again next poll to try the next.
 
-    Tries the stream's own quality across every eligible player type before
-    dropping quality, so a break costs resolution only when it has to. Returns
-    the first candidate that is both playable and clean, or None.
+    Deliberately a single attempt rather than the whole rotation. This runs while
+    a client is waiting for a playlist, and walking every player type at every
+    fallback quality in one call meant up to sixteen sequential `streamlink`
+    spawns inside a single HTTP request. That is what made a channel carrying
+    stitched ads unplayable in Jellyfin's ffmpeg - which gives up - while iOS
+    AVPlayer, which keeps retrying the playlist, eventually got through. One
+    attempt per poll covers the same ground at the poll cadence and never blocks.
+
+    Returns a candidate that is both playable and clean, or None to mean "not
+    this time" - the caller simply asks again.
     """
     now = time.monotonic()
-    candidates = state.available_types(native_player_type, now)
-    if not candidates:
-        log.info("no backup player types available", login=login)
+    if now < state.exhausted_until:
         return None
 
-    qualities = [quality]
-    if allow_low_quality:
-        qualities += [q for q in FALLBACK_QUALITIES if q != quality]
+    if not state.plan:
+        state.plan = state.build_plan(
+            native_player_type=native_player_type,
+            quality=quality,
+            allow_low_quality=allow_low_quality,
+            now=now,
+        )
+        if not state.plan:
+            state.exhausted_until = now + EXHAUSTED_COOLDOWN
+            log.info("no backup player types available", login=login)
+            return None
+        state.searches += 1
 
-    state.searches += 1
-    for attempt_quality in qualities:
-        for player_type in candidates:
-            if state.cooldowns.get(player_type, 0.0) > time.monotonic():
-                continue
-            try:
-                url = await resolver.resolve_live(
-                    login,
-                    quality=attempt_quality,
-                    user_token=user_token,
-                    player_type=player_type,
-                    force=True,
-                )
-            except resolver.ChannelOffline:
-                # The channel itself is gone; no player type will help.
-                log.info("channel went offline during backup search", login=login)
-                return None
-            except resolver.ResolveError as exc:
-                state.penalise(player_type, "error", time.monotonic())
-                log.debug(
-                    "backup resolve failed",
-                    login=login,
-                    player_type=player_type,
-                    error=str(exc)[:160],
-                )
-                continue
+    attempt_quality, player_type = state.plan.pop(0)
+    started = time.monotonic()
+    try:
+        candidate = await _try_candidate(
+            login=login,
+            quality=attempt_quality,
+            player_type=player_type,
+            state=state,
+            fetch=fetch,
+            user_token=user_token,
+        )
+    finally:
+        state.last_attempt_seconds = round(time.monotonic() - started, 3)
 
-            status, playlist = await fetch(url)
-            if status != 200 or not playlist:
-                state.penalise(player_type, "error", time.monotonic())
-                continue
+    if candidate is not None:
+        state.plan = []
+        log.info(
+            "clean backup stream found",
+            login=login,
+            player_type=candidate.player_type,
+            quality=candidate.quality,
+            degraded=candidate.quality != quality,
+            seconds=state.last_attempt_seconds,
+        )
+        return candidate
 
-            ok, reason = accepts(playlist)
-            if not ok:
-                state.penalise(player_type, reason, time.monotonic())
-                log.debug(
-                    "backup candidate rejected",
-                    login=login,
-                    player_type=player_type,
-                    quality=attempt_quality,
-                    reason=reason,
-                )
-                continue
-
-            log.info(
-                "clean backup stream found",
-                login=login,
-                player_type=player_type,
-                quality=attempt_quality,
-                degraded=attempt_quality != quality,
-            )
-            return BackupCandidate(
-                player_type=player_type,
-                quality=attempt_quality,
-                url=url,
-                playlist=playlist,
-            )
-
-    log.info(
-        "no clean backup found; every player type is carrying the ad",
-        login=login,
-        tried=len(candidates),
-    )
+    if not state.plan:
+        state.exhausted_until = time.monotonic() + EXHAUSTED_COOLDOWN
+        log.info(
+            "no clean backup found; every player type is carrying the ad",
+            login=login,
+            cooldown=EXHAUSTED_COOLDOWN,
+        )
     return None
+
+
+async def _try_candidate(
+    *,
+    login: str,
+    quality: str,
+    player_type: str,
+    state: BackupState,
+    fetch,
+    user_token: str | None,
+) -> BackupCandidate | None:
+    """Resolve and validate one player type. None means "not this one"."""
+    if state.cooldowns.get(player_type, 0.0) > time.monotonic():
+        return None
+
+    try:
+        url = await resolver.resolve_live(
+            login,
+            quality=quality,
+            user_token=user_token,
+            player_type=player_type,
+            force=True,
+            timeout=resolver.BACKUP_RESOLVE_TIMEOUT,
+        )
+    except resolver.ChannelOffline:
+        # The channel itself is gone; no player type will help. Cool the whole
+        # rotation rather than walking the rest of it one poll at a time.
+        log.info("channel went offline during backup search", login=login)
+        state.plan = []
+        return None
+    except resolver.ResolveError as exc:
+        state.penalise(player_type, "error", time.monotonic())
+        log.debug(
+            "backup resolve failed",
+            login=login,
+            player_type=player_type,
+            error=str(exc)[:160],
+        )
+        return None
+
+    status, playlist = await fetch(url)
+    if status != 200 or not playlist:
+        state.penalise(player_type, "error", time.monotonic())
+        return None
+
+    ok, reason = accepts(playlist)
+    if not ok:
+        state.penalise(player_type, reason, time.monotonic())
+        log.debug(
+            "backup candidate rejected",
+            login=login,
+            player_type=player_type,
+            quality=quality,
+            reason=reason,
+        )
+        return None
+
+    return BackupCandidate(
+        player_type=player_type,
+        quality=quality,
+        url=url,
+        playlist=playlist,
+    )

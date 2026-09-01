@@ -7,6 +7,7 @@ pinned down are invisible in any single poll.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -223,13 +224,18 @@ async def test_a_duration_less_pod_serves_no_segments_rather_than_leaking_one():
     empty, which put one segment of the commercial on screen every poll. An
     all-ad window now renders headers only, exactly as the pre-session proxy
     did.
+
+    The first playlist is clean so the session is warm. A *cold* session is the
+    one documented exception - see
+    `test_a_cold_session_passes_one_pod_rather_than_serving_nothing`.
     """
-    playlists = [
-        build_playlist(start_seq=100 + i, count=4, ad_at=100 + i, ad_len=4, ad_duration=None)
+    playlists = [build_playlist(start_seq=100, count=4)]
+    playlists += [
+        build_playlist(start_seq=104 + i, count=4, ad_at=104 + i, ad_len=4, ad_duration=None)
         for i in range(6)
     ]
     renders, _ = await poll_all(playlists)
-    for render in renders:
+    for render in renders[1:]:
         assert render.ad_pod
         assert render.segment_count == 0
         assert "ad1" not in render.text, "an ad segment reached the player"
@@ -341,15 +347,26 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
             )
         )
         stream_session.get("adapt", "best").last_render_at = 0.0
+        # The backup search runs detached, so it needs a turn of the event loop
+        # to finish. In production every poll awaits real network I/O and yields
+        # many times over; these fakes never block, so yield explicitly.
+        await asyncio.sleep(0)
 
     # No ad segment ever reaches the player...
     for render in renders:
         assert "ad10" not in render.text and "ad11" not in render.text
 
-    # ...and the break is filled with real video from the backup, not silence.
-    assert renders[1].backup_player_type == "embed"
-    assert "bak200.ts" in renders[1].text
-    assert renders[1].segment_count > 0, "the break produced no media"
+    # The first ad poll only *starts* the search and returns straight away - it
+    # is never awaited inline, because resolving a backup means spawning
+    # streamlink and doing that while the client waits for this playlist is what
+    # made an ad break look like a dead channel.
+    assert renders[1].backup_player_type is None
+
+    # ...and from the next poll the break is filled with real video from the
+    # backup, not silence.
+    assert renders[2].backup_player_type == "embed"
+    assert "bak200.ts" in renders[2].text
+    assert renders[2].segment_count > 0, "the break produced no media"
 
     session = stream_session.get("adapt", "best")
     assert session.stats.backup_polls >= 2
@@ -360,10 +377,13 @@ async def test_native_resumes_only_after_several_clean_polls():
     """One clean poll is routinely the gap between two pods of one break."""
     native = [
         build_playlist(start_seq=100, count=4),
-        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=4, ad_duration=8.0),
-        build_playlist(start_seq=108, count=4),  # clean 1 - not yet
-        build_playlist(start_seq=112, count=4),  # clean 2 - not yet
-        build_playlist(start_seq=116, count=4),  # clean 3 - switch back
+        # Two ad polls: the first starts the (detached) search, the second picks
+        # its result up. A backup is never awaited inline.
+        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=108, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=112, count=4),  # clean 1 - not yet
+        build_playlist(start_seq=116, count=4),  # clean 2 - not yet
+        build_playlist(start_seq=120, count=4),  # clean 3 - switch back
     ]
     backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
     backup_seq = {"n": 200}
@@ -395,8 +415,10 @@ async def test_native_resumes_only_after_several_clean_polls():
         session = stream_session.get("adapt", "best")
         session.last_render_at = 0.0
         serving.append(session.serving_backup)
+        # See the note in the test above: let the detached search complete.
+        await asyncio.sleep(0)
 
-    assert serving == [False, True, True, True, False], (
+    assert serving == [False, False, True, True, True, False], (
         "expected the backup to be held across the first clean polls"
     )
 
@@ -489,6 +511,9 @@ async def test_a_misfiring_title_heuristic_stops_being_believed():
         stream_session.get(login, "best").last_render_at = 0.0
         return render
 
+    # The first poll is a cold session, which passes its pod through so the
+    # player has something to probe; the heuristic bites from the second on.
+    await poll()
     render = await poll()
     session = stream_session.get(login, "best")
     assert session.trust_titles, "the heuristic starts trusted"
@@ -522,15 +547,36 @@ async def test_a_corroborated_pod_never_blames_the_title_rule():
 
 
 async def test_an_all_ad_playlist_is_never_passed_through():
-    """Not even on a cold session: an ad must never reach the player."""
+    """Once the session has served anything, an ad must never reach the player."""
+    playlists = [
+        build_playlist(start_seq=100, count=3),
+        build_playlist(start_seq=103, count=3, ad_at=103, ad_len=3, ad_duration=6.0),
+    ]
+    renders, _ = await poll_all(playlists)
+    assert renders[1].ad_pod
+    assert renders[1].segment_count == 0
+    assert "ad103.ts" not in renders[1].text
+
+
+async def test_a_cold_session_passes_one_pod_rather_than_serving_nothing():
+    """The one exception, and why it exists.
+
+    ffmpeg cannot probe a media playlist with no segments, so serving headers
+    only as the *first* thing a player ever sees fails the channel outright
+    rather than waiting the pod out - which is why a channel with a preroll
+    played in Streamyfin (iOS AVPlayer keeps polling and recovers) but never
+    started in the Jellyfin web UI. `hls.rewrite_playlist` has always applied
+    this rule on its own path: an unstripped ad is merely annoying, an empty
+    playlist is fatal. Stripping resumes from the next poll, by which point
+    there is a window to hold instead.
+    """
     fetch, _ = make_fetch([build_playlist(start_seq=100, count=3, ad_at=100, ad_len=3, ad_duration=6.0)])
     resolve, _ = make_resolve()
     render = await stream_session.get_playlist(
         login="adapt", quality="best", strip_ads=True, resolve=resolve, fetch=fetch
     )
-    assert render.ad_pod
-    assert render.segment_count == 0
-    assert "ad100.ts" not in render.text
+    assert not render.ad_pod
+    assert render.segment_count == 3, "the player must have something to probe"
 
 
 async def test_dead_upstream_status_triggers_a_reresolve():

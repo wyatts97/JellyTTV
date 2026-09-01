@@ -102,12 +102,28 @@ def test_xmltv_live_programme_carries_title_game_and_viewers():
     assert icon is not None and "%{width}" not in (icon.get("src") or "")
 
 
-def test_xmltv_fills_the_whole_window_even_when_offline():
+def test_an_offline_channel_gets_no_programmes_at_all():
+    """What keeps "Offline" cards out of Jellyfin's "On Now".
+
+    Jellyfin treats any programme covering the current time as airing, whatever
+    its title. Placeholder blocks kept clear of the present by a fixed gap only
+    worked until wall-clock time caught up with the gap - and an offline channel
+    never changes state, so nothing forces the fresh guide that would move it.
+    """
     guide = build_xmltv([_channel("beta", live=False)], window_hours=12)
     root = ET.fromstring(guide.split("\n", 2)[2])
-    programmes = root.findall("programme")
-    assert len(programmes) >= 3
-    assert all(p.findtext("title") == "Offline" for p in programmes)
+    assert root.findall("programme") == []
+    # The channel itself must survive, or Jellyfin churns its id and the user
+    # loses the channel from the Channels list along with any favourite.
+    assert [c.get("id") for c in root.findall("channel")] == ["twitch.beta"]
+
+
+def test_a_live_channel_is_not_followed_by_an_offline_placeholder():
+    """A trailing placeholder becomes "on now" the moment the live block ends."""
+    guide = build_xmltv([_channel("alpha", live=True)], window_hours=48)
+    root = ET.fromstring(guide.split("\n", 2)[2])
+    titles = [p.findtext("title") for p in root.findall("programme")]
+    assert titles == ["alpha is playing something"]
 
 
 def test_xmltv_timestamps_use_the_expected_format():

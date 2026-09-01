@@ -106,7 +106,11 @@ def test_strategy_falls_back_to_ttv_ab_for_null_or_nonsense():
 
 
 async def test_the_search_tries_player_types_until_one_comes_back_clean():
-    """The core of the strategy: one token is in a break, another is not."""
+    """The core of the strategy: one token is in a break, another is not.
+
+    The rotation is walked one attempt per call - see `find_backup` - so the
+    caller polls it rather than getting an answer from a single await.
+    """
     state = adblock.BackupState()
     resolved: list[str] = []
 
@@ -114,7 +118,7 @@ async def test_the_search_tries_player_types_until_one_comes_back_clean():
         # Only the third player type is out of the break.
         return 200, (CLEAN if url.endswith("mobile_web") else AD_MARKED)
 
-    async def fake_resolve(login, *, quality, user_token, player_type, force):
+    async def fake_resolve(login, *, quality, user_token, player_type, force, timeout=None):
         resolved.append(player_type)
         return f"https://video-weaver.b.hls.ttvnw.net/{player_type}"
 
@@ -123,13 +127,21 @@ async def test_the_search_tries_player_types_until_one_comes_back_clean():
     original = resolver.resolve_live
     resolver.resolve_live = fake_resolve
     try:
-        found = await adblock.find_backup(
-            login="chan",
-            quality="best",
-            native_player_type="site",
-            state=state,
-            fetch=fake_fetch,
-        )
+        found = None
+        for _ in range(len(adblock.BACKUP_PLAYER_TYPES)):
+            before = len(resolved)
+            found = await adblock.find_backup(
+                login="chan",
+                quality="best",
+                native_player_type="site",
+                state=state,
+                fetch=fake_fetch,
+            )
+            assert len(resolved) - before <= 1, (
+                "one call must cost at most one resolve, or it blocks the poll"
+            )
+            if found is not None:
+                break
     finally:
         resolver.resolve_live = original
 
@@ -148,7 +160,7 @@ async def test_the_search_gives_up_when_every_type_carries_the_ad():
     async def fake_fetch(url: str):
         return 200, AD_MARKED
 
-    async def fake_resolve(login, *, quality, user_token, player_type, force):
+    async def fake_resolve(login, *, quality, user_token, player_type, force, timeout=None):
         return f"https://video-weaver.b.hls.ttvnw.net/{player_type}"
 
     from app.services import resolver
@@ -156,15 +168,19 @@ async def test_the_search_gives_up_when_every_type_carries_the_ad():
     original = resolver.resolve_live
     resolver.resolve_live = fake_resolve
     try:
-        found = await adblock.find_backup(
-            login="chan",
-            quality="best",
-            native_player_type="site",
-            state=state,
-            fetch=fake_fetch,
-            allow_low_quality=False,
-        )
+        for _ in range(len(adblock.BACKUP_PLAYER_TYPES) + 1):
+            found = await adblock.find_backup(
+                login="chan",
+                quality="best",
+                native_player_type="site",
+                state=state,
+                fetch=fake_fetch,
+                allow_low_quality=False,
+            )
+            assert found is None
     finally:
         resolver.resolve_live = original
 
-    assert found is None
+    # Having walked the whole rotation with nothing clean, it stops searching for
+    # a while rather than respawning streamlink on every poll of the break.
+    assert state.exhausted_until > 0

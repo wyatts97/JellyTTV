@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from arq import create_pool
@@ -13,6 +14,19 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 _pool: ArqRedis | None = None
+
+# arq refuses an enqueue whose job id is already queued *or* whose result is
+# still stored, and `WorkerSettings.keep_result` is an hour. So a fixed job id
+# does not mean "coalesce a burst of triggers" - it means "run at most once an
+# hour", which is how every reactive Jellyfin guide refresh came to be dropped
+# for the rest of the hour after the first one ran. Bucketing the id by a short
+# window gives the coalescing that was actually wanted, with no blackout.
+COALESCE_SECONDS = 30
+
+
+def coalesced_job_id(name: str, *, window: int = COALESCE_SECONDS) -> str:
+    """A job id that dedupes triggers within `window` seconds and no longer."""
+    return f"{name}:{int(time.time() // window)}"
 
 
 def redis_settings() -> RedisSettings:
@@ -48,7 +62,13 @@ async def enqueue(
     defer_seconds: int | None = None,
     **kwargs: Any,
 ) -> str | None:
-    """Enqueue a job. `job_id` makes the enqueue idempotent (arq dedupes)."""
+    """Enqueue a job. `job_id` makes the enqueue idempotent (arq dedupes).
+
+    Note that arq's dedupe covers *stored results* as well as the queue, for
+    `keep_result` seconds. A fixed `job_id` therefore suppresses re-runs for far
+    longer than most callers intend; use `coalesced_job_id` unless a job really
+    should run only once per `keep_result` window.
+    """
     try:
         pool = await get_pool()
         job = await pool.enqueue_job(

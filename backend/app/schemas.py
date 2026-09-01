@@ -48,6 +48,7 @@ class SettingsUpdate(BaseModel):
     jellyfin_api_key: str | None = None
     jellyfin_shows_library_id: str | None = None
     jellyfin_auto_refresh: bool | None = None
+    jellyfin_force_guide_refresh: bool | None = None
 
     notify_on_live: bool | None = None
     notify_title_template: str | None = Field(default=None, max_length=200)
@@ -93,6 +94,7 @@ class SettingsOut(BaseModel):
     jellyfin_api_key_set: bool
     jellyfin_shows_library_id: str | None
     jellyfin_auto_refresh: bool
+    jellyfin_force_guide_refresh: bool
 
     notify_on_live: bool
     notify_title_template: str
@@ -294,6 +296,7 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         jellyfin_api_key_set=bool(row.jellyfin_api_key_enc),
         jellyfin_shows_library_id=row.jellyfin_shows_library_id,
         jellyfin_auto_refresh=row.jellyfin_auto_refresh,
+        jellyfin_force_guide_refresh=row.jellyfin_force_guide_refresh,
         notify_on_live=row.notify_on_live,
         notify_title_template=row.notify_title_template,
         notify_body_template=row.notify_body_template,
