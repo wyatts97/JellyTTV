@@ -271,9 +271,15 @@ async def _serve_normalised(
     """Feed this poll into the encoder and serve its output instead.
 
     Returns None when the encoder is not (yet) usable, which tells the caller to
-    serve the upstream playlist for now. Falling back is always safe: the two
-    playlists are independent, and a viewer joining mid-encode simply starts at
-    the encoder's live edge.
+    serve the upstream playlist for now.
+
+    **Never waits for the encoder.** An encoder needs several seconds of input
+    before it has written a segment worth serving, and blocking the request over
+    that is the exact failure this whole change set exists to remove: ffmpeg on
+    the Jellyfin side abandons a live stream that answers slowly, so a request
+    held open for the warm-up reads to a viewer as a channel that never starts.
+    The upstream playlist is served meanwhile, and the switch happens on
+    whichever poll first finds output ready.
     """
     key = stream_session.session_key(login, quality)
     norm = await normaliser.ensure(
@@ -293,7 +299,7 @@ async def _serve_normalised(
     if session is not None:
         normaliser.submit(norm, [seg.uri for seg in session.window])
 
-    if not await normaliser.wait_ready(norm):
+    if not norm.ready():
         return None
 
     try:

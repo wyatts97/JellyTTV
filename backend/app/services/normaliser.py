@@ -63,11 +63,19 @@ OUTPUT_SEGMENT_SECONDS = 2
 OUTPUT_LIST_SIZE = 10
 OUTPUT_GOP_SECONDS = 2
 
-# How long to wait for the encoder to produce a playable playlist before giving
-# up on it for this request. Deliberately below the router's own deadline.
-STARTUP_TIMEOUT = 5.0
 # A playlist needs a couple of segments before a player can do anything useful.
 MIN_STARTUP_SEGMENTS = 2
+
+# Where the encoder's own media sequence starts.
+#
+# An encoder takes several seconds of input before it has written anything, and
+# the upstream playlist is served meanwhile - so on the poll where output first
+# appears, the playlist a client is holding is replaced wholesale. HLS allows
+# that only in one direction: `#EXT-X-MEDIA-SEQUENCE` may leap forward (the
+# window moved on, rejoin at the live edge) but must never go backwards. Starting
+# the encoder's numbering far above anything the passthrough can reach in its
+# warm-up makes the one handover legal by construction.
+OUTPUT_START_NUMBER = 100_000
 
 # Restarts closer together than this mean the encoder is failing for a reason a
 # restart will not fix (bad flags, missing codec), so stop hammering it.
@@ -80,6 +88,12 @@ MAX_CONSECUTIVE_RESTARTS = 3
 ACCEPTED_MEMORY = 512
 
 HWACCELS = ("none", "vaapi", "nvenc", "qsv")
+
+# The render node VAAPI and QSV open. Present only when a GPU is exposed to the
+# container - `devices: [/dev/dri:/dev/dri]` in compose - and on a CPU that has
+# one at all. Many desktop Ryzen parts have no integrated graphics, in which
+# case software encoding is the only option.
+VAAPI_DEVICE = "/dev/dri/renderD128"
 
 _VIDEO_ENCODERS = {
     "none": "libx264",
@@ -117,6 +131,36 @@ async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
     )
 
 
+async def _drain_stderr(norm: Normaliser, process: asyncio.subprocess.Process) -> None:
+    """Read the encoder's diagnostics, and keep reading them.
+
+    Not optional. A piped stderr nobody reads fills its OS buffer after a page
+    or two of output, and the encoder then blocks forever on its next write -
+    alive, holding the pipe open, producing nothing. That looks exactly like a
+    hung stream and gives no clue why, because the one thing that would explain
+    it is the text stuck in the pipe.
+
+    Whatever ffmpeg says about a failed start is also the only way to find out
+    that, say, a hardware encoder is missing its device.
+    """
+    stream = process.stderr
+    if stream is None:
+        return
+    try:
+        while True:
+            line = await stream.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", "replace").strip()
+            if text:
+                norm.last_error = text
+                log.warning("ffmpeg", login=norm.login, message=text[:400])
+    except (asyncio.CancelledError, ValueError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - logging must never kill the encoder
+        log.debug("stopped reading encoder output", login=norm.login, error=str(exc)[:160])
+
+
 def build_command(
     *,
     workdir: Path,
@@ -124,17 +168,32 @@ def build_command(
     height: int,
     fps: int,
     hwaccel: str = "none",
+    start_number: int = OUTPUT_START_NUMBER,
 ) -> list[str]:
     """The encoder invocation. Pure, so a test can read it without running it."""
     encoder = _VIDEO_ENCODERS[resolve_hwaccel(hwaccel)]
     gop = str(fps * OUTPUT_GOP_SECONDS)
 
+    accel = resolve_hwaccel(hwaccel)
     argv = [
         FFMPEG_BIN,
         "-hide_banner",
         "-loglevel",
         "warning",
         "-nostdin",
+    ]
+
+    # A hardware encoder needs a device opened before the input, and frames
+    # handed to it in GPU memory. Naming the encoder alone is not enough: the
+    # filters below run on the CPU, so without an explicit upload ffmpeg has
+    # software frames on one side and a hardware encoder on the other and exits
+    # during setup rather than encoding anything.
+    if accel == "vaapi":
+        argv += ["-vaapi_device", VAAPI_DEVICE]
+    elif accel == "qsv":
+        argv += ["-init_hw_device", f"qsv=hw@va:{VAAPI_DEVICE}", "-filter_hw_device", "hw"]
+
+    argv += [
         # Discard the input's own timing entirely. This is the flag that makes an
         # upstream discontinuity a non-event: whatever the source thought the
         # time was, output timestamps come from when the bytes arrived.
@@ -160,6 +219,10 @@ def build_command(
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
         f"fps={fps}"
     )
+    if accel in ("vaapi", "qsv"):
+        # The upload has to be the last link in the chain, and the pixel format
+        # has to be one the hardware accepts before it happens.
+        vf += ",format=nv12,hwupload"
 
     argv += ["-c:v", encoder, "-vf", vf]
     if encoder == "libx264":
@@ -185,6 +248,8 @@ def build_command(
         str(OUTPUT_SEGMENT_SECONDS),
         "-hls_list_size",
         str(OUTPUT_LIST_SIZE),
+        "-start_number",
+        str(start_number),
         # `omit_endlist` keeps it a live playlist; `delete_segments` is what
         # bounds the work directory without anyone having to sweep it.
         "-hls_flags",
@@ -222,6 +287,10 @@ class Normaliser:
 
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     feeder: asyncio.Task | None = field(default=None, repr=False)
+    stderr_task: asyncio.Task | None = field(default=None, repr=False)
+    # The encoder's last complaint, surfaced in diagnostics. When an encoder
+    # will not stay up this is the only thing that says why.
+    last_error: str | None = None
     # Bounded on purpose: if the encoder cannot keep up, dropping the oldest
     # queued segment is right. Buffering minutes of video would only add latency
     # to a stream that is already behind the live edge.
@@ -268,6 +337,7 @@ class Normaliser:
             "ready": self.ready(),
             "failed": self.failed,
             "queue_depth": self.queue.qsize(),
+            "last_error": self.last_error,
             "age_s": round(time.monotonic() - self.started_at, 1) if self.started_at else 0.0,
             "stats": vars(self.stats),
         }
@@ -314,6 +384,7 @@ async def _start_process(
         norm.started_at = now
     norm.stats.started += 1
     norm.feeder = asyncio.create_task(_feed(norm, fetch_segment, launch))
+    norm.stderr_task = asyncio.create_task(_drain_stderr(norm, norm.process))
     log.info(
         "normaliser started",
         login=norm.login,
@@ -430,18 +501,6 @@ def submit(norm: Normaliser, uris: list[str]) -> int:
     return count
 
 
-async def wait_ready(norm: Normaliser, timeout: float = STARTUP_TIMEOUT) -> bool:
-    """Wait for the encoder to produce enough output to be worth serving."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if norm.ready():
-            return True
-        if norm.process is not None and norm.process.returncode is not None:
-            return False
-        await asyncio.sleep(0.1)
-    return norm.ready()
-
-
 async def stop(key: str) -> None:
     """Tear an encoder down and remove its work directory."""
     async with _registry_lock:
@@ -449,10 +508,11 @@ async def stop(key: str) -> None:
     if norm is None:
         return
 
-    if norm.feeder is not None and not norm.feeder.done():
-        norm.feeder.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await norm.feeder
+    for task in (norm.feeder, norm.stderr_task):
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     process = norm.process
     if process is not None and process.returncode is None:
         with contextlib.suppress(Exception):

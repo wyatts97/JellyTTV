@@ -21,6 +21,7 @@ class FakeProcess:
     def __init__(self) -> None:
         self.returncode: int | None = None
         self.stdin = FakeStdin()
+        self.stderr = FakeStderr([])
         self.terminated = False
         self.killed = False
 
@@ -34,6 +35,20 @@ class FakeProcess:
 
     async def wait(self) -> int:
         return self.returncode or 0
+
+
+class FakeStderr:
+    """Yields the given lines, then EOF - like a real pipe being drained."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = list(lines)
+        self.fully_read = False
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        self.fully_read = True
+        return b""
 
 
 class FakeStdin:
@@ -354,3 +369,92 @@ async def test_stopping_removes_the_work_directory(tmp_path: Path):
     assert process.terminated
     assert not workdir.exists(), "a stopped encoder must not leave its video behind"
     assert normaliser.get("adapt:best") is None
+
+
+# ----------------------------------------------------------- hardware encoding
+@pytest.mark.parametrize("accel", ["vaapi", "qsv"])
+def test_a_hardware_encoder_gets_a_device_and_an_upload(tmp_path: Path, accel):
+    """Naming the encoder is not enough, and getting this wrong looks like a hang.
+
+    The scale/pad filters run on the CPU. Handing their software frames straight
+    to a hardware encoder makes ffmpeg exit during setup, so the stream never
+    starts - the encoder needs a device opened before the input and the frames
+    uploaded at the end of the filter chain.
+    """
+    argv = normaliser.build_command(
+        workdir=tmp_path, width=1920, height=1080, fps=60, hwaccel=accel
+    )
+    joined = " ".join(argv)
+    assert normaliser.VAAPI_DEVICE in joined, "no render device was opened"
+
+    vf = argv[argv.index("-vf") + 1]
+    assert vf.endswith("format=nv12,hwupload"), (
+        "frames must be uploaded to the GPU as the last step of the chain"
+    )
+    # The device has to be set up before the input it applies to. QSV carries the
+    # path inside its device string, so match on the argument containing it.
+    device_at = next(i for i, a in enumerate(argv) if normaliser.VAAPI_DEVICE in a)
+    assert argv.index("-i") > device_at
+
+
+def test_software_encoding_uploads_nothing(tmp_path: Path):
+    argv = normaliser.build_command(workdir=tmp_path, width=1920, height=1080, fps=60)
+    joined = " ".join(argv)
+    assert "hwupload" not in joined
+    assert normaliser.VAAPI_DEVICE not in joined
+
+
+def test_nvenc_takes_software_frames_directly(tmp_path: Path):
+    """Unlike VAAPI and QSV, NVENC accepts CPU frames - uploading would break it."""
+    argv = normaliser.build_command(
+        workdir=tmp_path, width=1920, height=1080, fps=60, hwaccel="nvenc"
+    )
+    assert argv[argv.index("-c:v") + 1] == "h264_nvenc"
+    assert "hwupload" not in " ".join(argv)
+
+
+def test_the_encoder_numbering_starts_clear_of_the_passthrough(tmp_path: Path):
+    """The handover from upstream playlist to encoder output must stay legal.
+
+    The upstream playlist is served while the encoder warms up, so the swap
+    replaces what the client is holding. `#EXT-X-MEDIA-SEQUENCE` may leap
+    forward across that, but must never go backwards.
+    """
+    argv = normaliser.build_command(workdir=tmp_path, width=1920, height=1080, fps=60)
+    assert int(argv[argv.index("-start_number") + 1]) >= 100_000
+
+
+# --------------------------------------------------------------- diagnostics
+async def test_the_encoders_own_errors_are_read_and_recorded(tmp_path: Path, stopped):
+    """A piped stderr nobody reads fills up, and then the encoder blocks forever.
+
+    That failure mode is silent and looks exactly like a stream that never
+    starts, so the output has to be consumed continuously - and the text is also
+    the only thing that explains why a start failed.
+    """
+    process = FakeProcess()
+    process.stderr = FakeStderr([b"Device creation failed: -22.\n", b"Error opening output.\n"])
+    launch, _ = make_launcher([process])
+
+    async def fetch(uri: str) -> bytes:
+        return b""
+
+    norm = await normaliser.ensure(
+        key="adapt:best",
+        login="adapt",
+        workdir=tmp_path / "adapt",
+        width=1920,
+        height=1080,
+        fps=60,
+        fetch_segment=fetch,
+        launch=launch,
+    )
+    assert norm is not None
+    for _ in range(40):
+        if norm.last_error:
+            break
+        await asyncio.sleep(0.01)
+
+    assert norm.last_error == "Error opening output."
+    assert process.stderr.fully_read, "the pipe must be drained, or ffmpeg blocks on it"
+    assert norm.snapshot()["last_error"] == "Error opening output."
