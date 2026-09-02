@@ -92,7 +92,13 @@ def make_resolve(url: str = "https://video-weaver.a.hls.ttvnw.net/v1/playlist/x.
     return resolve, calls
 
 
-async def poll_all(playlists: list[str], *, strip_ads: bool = True, login: str = "adapt"):
+async def poll_all(
+    playlists: list[str],
+    *,
+    strip_ads: bool = True,
+    login: str = "adapt",
+    egress_flip: bool = False,
+):
     """Feed each playlist through the session in order, collecting the output."""
     fetch, _ = make_fetch(playlists)
     resolve, resolve_calls = make_resolve()
@@ -104,6 +110,7 @@ async def poll_all(playlists: list[str], *, strip_ads: bool = True, login: str =
             strip_ads=strip_ads,
             resolve=resolve,
             fetch=fetch,
+            egress_flip=egress_flip,
         )
         out.append(render)
         # Defeat the 1s render cache: each call must be treated as a fresh poll.
@@ -114,6 +121,12 @@ async def poll_all(playlists: list[str], *, strip_ads: bool = True, login: str =
 
 # ------------------------------------------------------------------ invariants
 _MSEQ = re.compile(r"#EXT-X-MEDIA-SEQUENCE:(\d+)")
+_SEGMENT_BLOCK = re.compile(
+    r"(?P<disc>#EXT-X-DISCONTINUITY\n)?"
+    r"(?:#EXT-X-PROGRAM-DATE-TIME:(?P<pdt>\S+)\n)?"
+    r"#EXTINF:(?P<dur>[\d.]+),[^\n]*\n"
+    r"(?P<uri>https://\S+)"
+)
 _DSEQ = re.compile(r"#EXT-X-DISCONTINUITY-SEQUENCE:(\d+)")
 _URI = re.compile(r"^https://\S+$", re.MULTILINE)
 
@@ -152,6 +165,38 @@ def assert_playlist_continuity(texts: list[str]) -> None:
                 assert seen_uri_seq[uri] == seq, f"{uri} re-emitted under a new sequence number"
             else:
                 seen_uri_seq[uri] = seq
+
+        assert_no_unmarked_hole(text)
+
+
+def assert_no_unmarked_hole(text: str) -> None:
+    """Wall-clock time and media time must advance together, or say why not.
+
+    This is the invariant the desync bug lived under. Cutting content out of the
+    window leaves `#EXT-X-PROGRAM-DATE-TIME` jumping further than the durations
+    served, and because ffmpeg's HLS demuxer ignores `#EXT-X-DISCONTINUITY`
+    (trac #5419) that jump reaches Jellyfin as raw timestamp movement, which
+    video and audio absorb differently. Every previous assertion here passed
+    throughout, because none of them looked at time.
+
+    A discontinuity is the licence for the two clocks to disagree; without one
+    they must match.
+    """
+    blocks = list(_SEGMENT_BLOCK.finditer(text))
+    for previous, current in zip(blocks, blocks[1:], strict=False):
+        if current.group("disc"):
+            continue
+        if not previous.group("pdt") or not current.group("pdt"):
+            continue
+        moved = (
+            datetime.fromisoformat(current.group("pdt"))
+            - datetime.fromisoformat(previous.group("pdt"))
+        ).total_seconds()
+        served = float(previous.group("dur"))
+        assert abs(moved - served) < 0.5, (
+            f"{moved:.3f}s of wall clock passed but {served:.3f}s was served, "
+            f"with no discontinuity marking the gap"
+        )
 
 
 # ----------------------------------------------------------------------- tests
@@ -217,40 +262,43 @@ async def test_weaver_switch_is_absorbed_when_pdt_matches():
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_a_duration_less_pod_serves_no_segments_rather_than_leaking_one():
+async def test_a_duration_less_pod_does_not_leak_its_tail_into_the_window():
     """A duration-less pod must not hand back its tail to keep the list full.
 
     The old parser un-marked the final segment so the playlist would never be
-    empty, which put one segment of the commercial on screen every poll. An
-    all-ad window now renders headers only, exactly as the pre-session proxy
-    did.
+    empty, which put one segment of the commercial on screen every poll.
 
-    The first playlist is clean so the session is warm. A *cold* session is the
-    one documented exception - see
-    `test_a_cold_session_passes_one_pod_rather_than_serving_nothing`.
+    A duration-less range runs to the end of the window by definition, so the
+    content has to sit in front of it; once the window has scrolled entirely
+    inside the range the poll is an all-ad pod and is passed through instead,
+    which is a different rule tested separately.
     """
-    playlists = [build_playlist(start_seq=100, count=4)]
-    playlists += [
-        build_playlist(start_seq=104 + i, count=4, ad_at=104 + i, ad_len=4, ad_duration=None)
-        for i in range(6)
+    playlists = [
+        build_playlist(start_seq=100 + i, count=8, ad_at=104, ad_len=4, ad_duration=None)
+        for i in range(3)
     ]
     renders, _ = await poll_all(playlists)
-    for render in renders[1:]:
-        assert render.ad_pod
-        assert render.segment_count == 0
-        assert "ad1" not in render.text, "an ad segment reached the player"
+    for render in renders:
+        assert not render.ad_pod, "content still precedes the pod in every poll"
+        assert render.segment_count > 0
+        for seq in range(104, 108):
+            assert f"ad{seq}.ts" not in render.text, "an ad segment reached the player"
+    assert "seg103.ts" in renders[-1].text, "content before the pod must survive"
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_a_full_ad_pod_serves_nothing_and_content_resumes_after():
-    """The regression that put full-quality ad breaks on screen.
+async def test_a_full_ad_pod_is_passed_through_to_keep_the_timeline_whole():
+    """Why an unblocked ad beats a hole in the stream.
 
-    When every segment upstream is an ad, `kept` is empty. The old code read
-    that as "we are about to serve an empty playlist" and passed the entire pod
-    through, so the viewer got the ad in full quality - the single outcome ad
-    stripping exists to prevent. Nothing is served now: the playlist goes to
-    headers only for the length of the break, which is what the original
-    stateless proxy did, and real content on both sides still flows normally.
+    When every segment upstream is an ad and no backup could replace it, the pod
+    plays. Cutting it out instead removes its whole duration from the media
+    timeline, and ffmpeg's HLS demuxer ignores `#EXT-X-DISCONTINUITY` (trac
+    #5419), so the jump reaches Jellyfin uncompensated and leaves audio behind by
+    the length of the break - permanently, and cumulatively across a session.
+
+    So the ad is served, no discontinuity is introduced, and playback continues
+    in sync. Ad avoidance is what the backup search is for; when it has nothing
+    to offer, an ad is the cheaper failure.
     """
     # An 8-segment (16s) pod, so it spans two consecutive polls.
     playlists = [
@@ -261,14 +309,14 @@ async def test_a_full_ad_pod_serves_nothing_and_content_resumes_after():
     ]
     renders, _ = await poll_all(playlists)
 
-    for render in renders:
-        assert "ad10" not in render.text and "ad11" not in render.text, (
-            "an ad segment reached the player"
-        )
-
-    # The break renders nothing at all rather than re-serving stale segments.
+    # The pod is still recognised - it is served deliberately, not missed.
     assert [r.ad_pod for r in renders] == [False, True, True, False]
-    assert renders[1].segment_count == 0
+    assert all(r.segment_count > 0 for r in renders), "the player must never starve"
+    assert "ad104.ts" in renders[1].text, "the pod was cut instead of played"
+
+    # The point of serving it: no hole, so nothing to mark and nothing to drift.
+    assert renders[1].removed_segments == 0
+    assert "#EXT-X-DISCONTINUITY" not in renders[1].text
 
     # Real content from both sides of the break still gets through.
     assert "seg100.ts" in renders[0].text
@@ -352,9 +400,12 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
         # many times over; these fakes never block, so yield explicitly.
         await asyncio.sleep(0)
 
-    # No ad segment ever reaches the player...
-    for render in renders:
-        assert "ad10" not in render.text and "ad11" not in render.text
+    # The break costs exactly one poll of ad while the detached search completes -
+    # the alternative, awaiting it inline, is what used to hold the response open
+    # until ffmpeg gave up. Those segments then age out of the window normally,
+    # so what matters is that no *further* ad is ever committed.
+    ad_uris = {u for r in renders for u in _URI.findall(r.text) if "/ad1" in u}
+    assert len(ad_uris) == 4, f"only the one pod-poll should have been served: {ad_uris}"
 
     # The first ad poll only *starts* the search and returns straight away - it
     # is never awaited inline, because resolving a backup means spawning
@@ -427,10 +478,14 @@ async def test_an_ad_pod_triggers_one_re_resolve_from_the_other_egress():
     """Go and get a different stream rather than waiting the break out.
 
     An ad is baked in when Twitch mints the playback token, so a fresh token
-    from a different egress often comes back clean - which turns a break from
-    dead air for its full duration into a brief gap. Flipping the proxied/direct
+    from a different egress often comes back clean. Flipping the proxied/direct
     polarity is what makes the retry meaningfully different, since the thing
     that changes the outcome is the IP Twitch sees.
+
+    This is TTV LOL PRO's move and only its move, so the caller has to ask for
+    it. It lands the session on a different weaver node, which is a seam in the
+    stream - worth paying when the token is the only lever available, and not
+    worth paying under TTV-AB, where the backup search already gets a clean one.
     """
     playlists = [
         build_playlist(start_seq=100, count=4),
@@ -443,7 +498,12 @@ async def test_an_ad_pod_triggers_one_re_resolve_from_the_other_egress():
 
     for _ in playlists:
         await stream_session.get_playlist(
-            login="adapt", quality="best", strip_ads=True, resolve=resolve, fetch=fetch
+            login="adapt",
+            quality="best",
+            strip_ads=True,
+            resolve=resolve,
+            fetch=fetch,
+            egress_flip=True,
         )
         stream_session.get("adapt", "best").last_render_at = 0.0
 
@@ -461,11 +521,31 @@ async def test_the_polarity_flip_is_capped_not_repeated_every_poll():
         build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
         for i in range(8)
     ]
-    await poll_all(playlists)
+    await poll_all(playlists, egress_flip=True)
     session = stream_session.get("adapt", "best")
 
     assert session.stats.ad_pod_polls >= 6, "the break should have spanned many polls"
     assert session.stats.ad_replacements == 1, "one replacement per break, not per poll"
+
+
+async def test_the_polarity_flip_is_off_unless_the_caller_asks_for_it():
+    """Only TTV LOL PRO pays for a weaver switch to escape an ad.
+
+    Under every other strategy the flip fired anyway, so each ad break moved the
+    session onto a different `video-weaver` node - a different encoder instance
+    whose timestamps are not promised to continue the old one's - in exchange
+    for nothing.
+    """
+    playlists = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(4)
+    ]
+    await poll_all(playlists)
+    session = stream_session.get("adapt", "best")
+
+    assert session.stats.ad_pod_polls >= 3, "the break should have spanned many polls"
+    assert session.stats.ad_replacements == 0, "no egress flip was asked for"
+    assert session.prefer_direct_resolve is False
 
 
 def build_amazon_titled_playlist(*, start_seq: int, count: int = 4) -> str:
@@ -546,16 +626,26 @@ async def test_a_corroborated_pod_never_blames_the_title_rule():
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_an_all_ad_playlist_is_never_passed_through():
-    """Once the session has served anything, an ad must never reach the player."""
+async def test_ads_surrounded_by_content_are_still_stripped():
+    """Passing a *pod* through must not amount to giving up on ad stripping.
+
+    The distinction is whether removing the ads leaves a hole. Here they sit
+    inside a window with real content on both sides, so cutting them costs
+    nothing in continuity and they go - which is the case ad stripping was
+    always for.
+    """
     playlists = [
-        build_playlist(start_seq=100, count=3),
-        build_playlist(start_seq=103, count=3, ad_at=103, ad_len=3, ad_duration=6.0),
+        build_playlist(start_seq=100 + i, count=8, ad_at=103, ad_len=2, ad_duration=4.0)
+        for i in range(6)
     ]
     renders, _ = await poll_all(playlists)
-    assert renders[1].ad_pod
-    assert renders[1].segment_count == 0
-    assert "ad103.ts" not in renders[1].text
+    for render in renders:
+        assert not render.ad_pod
+        assert "ad103.ts" not in render.text
+        assert "ad104.ts" not in render.text
+    assert any(r.removed_segments > 0 for r in renders), "nothing was ever stripped"
+    assert "seg102.ts" in renders[0].text and "seg105.ts" in renders[0].text
+    assert_playlist_continuity([r.text for r in renders])
 
 
 async def test_a_cold_session_passes_one_pod_rather_than_serving_nothing():
@@ -575,7 +665,7 @@ async def test_a_cold_session_passes_one_pod_rather_than_serving_nothing():
     render = await stream_session.get_playlist(
         login="adapt", quality="best", strip_ads=True, resolve=resolve, fetch=fetch
     )
-    assert not render.ad_pod
+    assert render.ad_pod, "the pod is still recognised"
     assert render.segment_count == 3, "the player must have something to probe"
 
 
@@ -668,3 +758,50 @@ async def test_segments_without_pdt_still_dedupe_by_filename():
     playlists = [build_playlist(start_seq=100 + i, with_pdt=False) for i in range(15)]
     renders, _ = await poll_all(playlists)
     assert_playlist_continuity([r.text for r in renders])
+
+
+def test_the_continuity_guard_actually_catches_a_hole():
+    """Proof the invariant above is not vacuous.
+
+    A playlist where the clock jumps 20s while 2s of media is served, with
+    nothing marking it - which is exactly what cutting an ad pod used to
+    produce, and exactly what left audio 20s behind.
+    """
+    hole = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXT-X-TARGETDURATION:2\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n"
+        "#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00+00:00\n"
+        "#EXTINF:2.000,\n"
+        "https://video-weaver.a.hls.ttvnw.net/v1/playlist/seg0.ts\n"
+        "#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:20+00:00\n"
+        "#EXTINF:2.000,\n"
+        "https://video-weaver.a.hls.ttvnw.net/v1/playlist/seg10.ts\n"
+    )
+    with pytest.raises(AssertionError, match="no discontinuity"):
+        assert_no_unmarked_hole(hole)
+
+    # The same jump is fine once it is declared, which is the only difference.
+    declared = hole.replace(
+        "#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:20+00:00",
+        "#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:20+00:00",
+    )
+    assert_no_unmarked_hole(declared)
+
+
+async def test_target_duration_is_never_below_the_longest_segment():
+    """Players size their buffer and reload interval off TARGETDURATION.
+
+    Twitch nominally sends 2s segments but real EXTINF values drift above 2.5 on
+    a keyframe shift, and `round` then declared 2 - understating the window, so
+    players polled early and re-polled into an unchanged playlist.
+    """
+    stretched = build_playlist(start_seq=100, count=4).replace(
+        "#EXTINF:2.000,", "#EXTINF:2.600,", 1
+    )
+    renders, _ = await poll_all([stretched])
+    text = renders[0].text
+    declared = int(re.search(r"#EXT-X-TARGETDURATION:(\d+)", text).group(1))
+    longest = max(float(d) for d in re.findall(r"#EXTINF:([\d.]+),", text))
+    assert declared >= longest, f"TARGETDURATION {declared} understates a {longest}s segment"

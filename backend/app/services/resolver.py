@@ -28,6 +28,10 @@ YTDLP_BIN = "yt-dlp"
 # shorter: there, a slow candidate is worse than no candidate.
 DEFAULT_RESOLVE_TIMEOUT = 45.0
 BACKUP_RESOLVE_TIMEOUT = 8.0
+# Live playback resolves are awaited while a stream session holds its lock, so
+# they cannot use the generous default: every poll for that channel queues
+# behind them.
+LIVE_RESOLVE_TIMEOUT = 15.0
 
 # Twitch decides whether to stitch ads into the playlist partly from the
 # `playerType` sent with the access-token request. Asking for a non-default

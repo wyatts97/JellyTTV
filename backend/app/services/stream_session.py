@@ -72,6 +72,13 @@ RENDER_CACHE_SECONDS = 1.0
 MIN_RESOLVE_INTERVAL = 5.0
 MAX_CONSECUTIVE_FAILURES = 3
 
+# How far the wall clock may drift from the media timeline between two adjacent
+# segments before we call it a real hole. Segment durations and PROGRAM-DATE-TIME
+# never line up exactly, so this has to absorb ordinary jitter while still
+# catching a cut - and a cut is at minimum a whole segment, so half a second is
+# comfortably inside the gap it needs to find.
+PDT_GAP_TOLERANCE = 0.5
+
 SESSION_IDLE_SECONDS = 90.0
 SESSION_MAX_SECONDS = 6 * 60 * 60
 
@@ -157,8 +164,9 @@ class PlaylistRender:
     discontinuity_sequence: int
     segment_count: int
     removed_segments: int = 0
-    # This poll was entirely advertising, so no segments were served at all -
-    # the playlist is headers only, exactly as the pre-session proxy rendered it.
+    # This poll was entirely advertising. Reported for diagnostics only - it no
+    # longer means "nothing was served", because the window is always fed from
+    # something (a backup if one was found, otherwise the ad itself).
     ad_pod: bool = False
     # Set while the window is being fed from another player type's stream.
     backup_player_type: str | None = None
@@ -197,6 +205,13 @@ class StreamSession:
     window: deque[OutputSegment] = field(default_factory=deque)
     seen: OrderedDict[str, tuple[int, float]] = field(default_factory=OrderedDict)
     ad_ranges: dict[str, AdRange] = field(default_factory=dict)
+
+    # Wall clock and duration of the last segment committed, so the next one can
+    # be checked for a hole in *time*. The upstream index comparison alone cannot
+    # see a gap that spans two polls, and that is exactly the kind that reaches a
+    # player as a silent timestamp jump.
+    last_pdt_epoch: float | None = None
+    last_pdt_duration: float = 0.0
 
     # Length of the current run of ad-only polls, and whether the EXTINF-title
     # heuristic is still believed for this channel.
@@ -353,14 +368,19 @@ def _request_ad_replacement(session: StreamSession) -> None:
 
     An ad is baked in when Twitch mints the playback token, so a fresh token
     from a different egress often comes back without one - this is how TTV LOL
-    PRO recovers, and it turns a break from "dead air for its full duration"
-    into a brief gap. Dropping `upstream_url` makes the next poll re-resolve;
+    PRO recovers. Dropping `upstream_url` makes the next poll re-resolve;
     flipping `prefer_direct_resolve` makes that resolve come from the other side
     of the proxy than the one that just served an ad.
 
     Fires once per break. Retrying every poll would respawn streamlink several
     times a second for the length of a midroll, and the extension caps itself
     the same way for the same reason.
+
+    Only called under the `ttv_lol_pro` strategy. It used to fire on every
+    strategy, which meant every ad break moved the session onto a different
+    `video-weaver` node - a different encoder instance, with no guarantee its
+    timestamps continue the old one's. Under `ttv_ab` the backup search already
+    mints a clean token, so the flip bought nothing and cost a seam every break.
     """
     if session.consecutive_ad_polls != 1:
         return
@@ -408,8 +428,14 @@ def _advance(
     strip_ads: bool,
     rewrite_uri: UriRewriter | None,
     now: float,
-) -> tuple[int, bool]:
-    """Fold one poll into the session. Returns (removed_segments, ad_pod)."""
+) -> int:
+    """Fold one poll into the session. Returns the number of segments removed.
+
+    Deliberately has no opinion on what to do about an all-ad poll: the caller
+    decides which source to fold and whether stripping applies, because that
+    decision needs to know whether a backup is available and this function does
+    not. See `get_playlist`.
+    """
     rewriter = rewrite_uri or (lambda u: u)
 
     # Target duration must never shrink: a mid-session drop makes players
@@ -427,59 +453,23 @@ def _advance(
     kept = [s for s in parsed.segments if not s.is_ad] if strip_ads else list(parsed.segments)
     removed = len(parsed.segments) - len(kept)
 
-    ad_pod = bool(strip_ads and parsed.segments and not kept)
-    if ad_pod and session.next_seq == 0:
-        # Nothing has ever been handed out, so an empty playlist would be the
-        # very first thing the player sees - and ffmpeg cannot probe a playlist
-        # with no segments, so it fails outright instead of waiting the pod out.
-        # (A more patient player, like iOS AVPlayer, keeps polling and recovers -
-        # which is exactly why a channel with a preroll played in Streamyfin and
-        # not in the Jellyfin web UI.) The rule `hls.rewrite_playlist` already
-        # applies holds here: an unstripped ad is merely annoying, an empty
-        # playlist is fatal. Pass this one pod through; stripping resumes on the
-        # next poll, by which point the session has a window to hold instead.
-        log.info(
-            "ad pod at session start - passing it through rather than serving nothing",
-            login=session.login,
-            segments=len(parsed.segments),
-        )
-        kept = list(parsed.segments)
-        removed = 0
-        ad_pod = False
-
-    if ad_pod:
-        # Every segment upstream is advertising, so nothing is served - the
-        # caller renders a headers-only playlist, which is exactly what the
-        # pre-session proxy did. No segment is ever passed through and no
-        # previous window is re-served: an ad must not reach the player, and
-        # re-serving stale segments only makes ffmpeg wait silently instead of
-        # noticing and rejoining at the live edge.
-        session.consecutive_ad_polls += 1
-        session.stats.ad_pod_polls += 1
-        session.pending_discontinuity = True
-        _distrust_titles_if_endless(session, parsed)
-        _request_ad_replacement(session)
-        log.info(
-            "ad pod - serving no segments",
-            login=session.login,
-            segments=len(parsed.segments),
-            consecutive=session.consecutive_ad_polls,
-            prefer_direct=session.prefer_direct_resolve,
-        )
-
     prev_index: int | None = None
     for seg in kept:
         key = segment_key(seg, session.generation)
         if key in session.seen:
             prev_index = seg.index
+            session.last_pdt_epoch = seg.program_date_epoch
+            session.last_pdt_duration = seg.duration
             continue
 
-        # Real content resumed, so the ad-only run is over.
-        session.consecutive_ad_polls = 0
-
-        # A hole in the upstream indices means we removed an ad pod here.
+        # A hole in the upstream indices means segments were removed here.
         gap = prev_index is not None and seg.index != prev_index + 1
-        discontinuity = seg.discontinuity_before or gap or session.pending_discontinuity
+        discontinuity = (
+            seg.discontinuity_before
+            or gap
+            or session.pending_discontinuity
+            or _pdt_gap(session, seg)
+        )
         session.pending_discontinuity = False
 
         out = OutputSegment(
@@ -496,10 +486,37 @@ def _advance(
         session.window.append(out)
         session.seen[key] = (out.seq, now + SEEN_TTL)
         prev_index = seg.index
+        session.last_pdt_epoch = seg.program_date_epoch
+        session.last_pdt_duration = seg.duration
 
     _evict(session)
     _prune_seen(session, now)
-    return removed, ad_pod
+    return removed
+
+
+def _pdt_gap(session: StreamSession, seg: UpstreamSegment) -> bool:
+    """Did wall-clock time move further than the media timeline did?
+
+    The index comparison above only sees holes *within* one poll. A hole that
+    spans two polls - a skipped poll, an upstream jump, a pod that consumed a
+    whole window - leaves the indices looking contiguous, so the output would
+    carry a timestamp jump with nothing marking it. Comparing
+    `#EXT-X-PROGRAM-DATE-TIME` against the duration we actually served catches
+    those, which matters because an unmarked jump is the one thing a player
+    cannot compensate for.
+    """
+    if seg.program_date_epoch is None or session.last_pdt_epoch is None:
+        return False
+    expected = session.last_pdt_epoch + session.last_pdt_duration
+    drift = seg.program_date_epoch - expected
+    if drift <= PDT_GAP_TOLERANCE:
+        return False
+    log.info(
+        "timeline gap detected from program-date-time",
+        login=session.login,
+        seconds=round(drift, 3),
+    )
+    return True
 
 
 async def _apply_backup(
@@ -507,12 +524,17 @@ async def _apply_backup(
     backup: BackupFinder,
     *,
     ad_pod: bool,
-    parsed: ParsedPlaylist,
     fetch: Fetcher,
     rewrite_uri: UriRewriter | None,
     now: float,
 ) -> bool:
-    """Splice a clean backup stream over an ad break. Returns the new ad_pod.
+    """Splice a clean backup stream over an ad break.
+
+    Returns True when the window was fed from the backup this poll, so the
+    caller knows not to fold the native poll as well. Exactly one source per
+    poll: folding both used to put the same wall-clock content into the window
+    twice during the hand-back window, and the PDT dedupe only hid it when two
+    encoders' clocks agreed to within 100ms.
 
     This is the whole point of the TTV-AB strategy: an ad is stitched per token,
     so the same channel on another player type is usually still carrying the
@@ -543,14 +565,12 @@ async def _apply_backup(
     if session.backup.active is None:
         # Never awaited inline: a search resolves through streamlink, and doing
         # that while the client waits for this playlist is what made an ad break
-        # look like a dead channel. Start one, serve what we can now, and pick
-        # the result up on a later poll.
+        # look like a dead channel. Start one, let the caller pass the ad through
+        # for now, and pick the result up on a later poll.
         candidate = _take_backup_result(session)
         if candidate is None:
             _start_backup_search(session, backup)
-            # No backup yet, so this poll still emits nothing - but it returns
-            # immediately instead of holding the request open.
-            return True
+            return False
         session.backup.active = candidate
         session.serving_backup = True
         session.pending_discontinuity = True
@@ -572,6 +592,10 @@ async def _serve_backup(
 ) -> bool:
     """Poll the active backup and fold its newest segments in.
 
+    Returns True when segments were actually folded. Every failure path returns
+    False and drops the backup, which hands the poll back to the native stream
+    rather than leaving the window unfed.
+
     Re-validated on every poll rather than trusted once: a backup can start
     carrying the ad itself part-way through a break, and TTV-AB re-checks
     continuously for the same reason. A backup that goes bad is dropped and
@@ -579,13 +603,14 @@ async def _serve_backup(
     """
     active = session.backup.active
     if active is None:
-        return True
+        return False
 
     status, playlist = await fetch(active.url)
     if status != 200 or not playlist:
         session.backup.penalise(active.player_type, "error", now)
         session.backup.clear()
-        return True
+        session.serving_backup = False
+        return False
 
     from app.services import adblock
 
@@ -599,7 +624,8 @@ async def _serve_backup(
         )
         session.backup.penalise(active.player_type, reason, now)
         session.backup.clear()
-        return True
+        session.serving_backup = False
+        return False
 
     parsed = hls.parse_media_playlist(
         playlist, active.url, strip_ads=True, now=now, trust_titles=session.trust_titles
@@ -607,38 +633,25 @@ async def _serve_backup(
     if not parsed.segments:
         session.backup.penalise(active.player_type, "not-playable", now)
         session.backup.clear()
-        return True
+        session.serving_backup = False
+        return False
 
     _advance(session, parsed, strip_ads=True, rewrite_uri=rewrite_uri, now=now)
     session.stats.backup_polls += 1
-    return False
+    return True
 
 
-def _render(session: StreamSession, *, ad_pod: bool = False) -> PlaylistRender:
-    """Render the current window, or a headers-only playlist during an ad pod.
+def _render(session: StreamSession) -> PlaylistRender:
+    """Render the current window.
 
-    An ad pod renders no segments at all rather than re-serving the window. The
-    window's segments have already been played, so re-serving them only tells
-    ffmpeg "nothing new yet" indefinitely; an empty playlist lets it notice and
-    rejoin at the live edge once the break ends. `MEDIA-SEQUENCE` is held at its
-    current value so numbering stays monotonic across the gap.
+    There is no longer a segment-less variant. Serving headers only was how an
+    ad break used to be handled, and it cost the stream twice over: the player
+    starved for the length of the pod, and the content we skipped came back as a
+    timestamp jump that ffmpeg's HLS demuxer does not compensate for, leaving
+    audio behind by the length of the break. The window is always fed from
+    something now - native, a backup, or the ad itself - so this always has
+    segments to render.
     """
-    if ad_pod:
-        return PlaylistRender(
-            text=hls.render_media_playlist(
-                [],
-                target_duration=session.target_duration,
-                media_sequence=session.last_media_sequence,
-                discontinuity_sequence=session.discontinuity_seq,
-                version=session.version,
-                passthrough_tags=session.passthrough_tags,
-            ),
-            media_sequence=session.last_media_sequence,
-            discontinuity_sequence=session.discontinuity_seq,
-            segment_count=0,
-            ad_pod=True,
-        )
-
     media_sequence = session.window[0].seq if session.window else session.last_media_sequence
     # Monotonicity is structural (append-right / pop-left over increasing seq),
     # but clamp anyway so a future bug degrades into a stall rather than a reset.
@@ -687,6 +700,13 @@ async def _acquire_upstream(
     url = await resolve(session.prefer_direct_resolve)
     if force and session.upstream_url and url != session.upstream_url:
         session.generation += 1
+        # A different weaver node is a different encoder instance, and nothing
+        # promises its timestamps continue the old one's. PDT-based identity
+        # makes the switch invisible to dedupe, which is what we want, but the
+        # seam still has to be declared or a player has no idea the timeline
+        # moved under it.
+        session.pending_discontinuity = True
+        log.info("upstream weaver changed; marking the seam", login=session.login)
     session.upstream_url = url
     return url
 
@@ -778,13 +798,27 @@ async def get_playlist(
     variant: str | None = None,
     backup: BackupFinder | None = None,
     report_ads: AdReporter | None = None,
+    egress_flip: bool = False,
 ) -> PlaylistRender:
     """Return the client-facing playlist for this channel, advancing the session.
 
-    `backup` enables TTV-AB-style substitution: when the whole upstream window is
-    advertising, it goes and finds the same channel on a different player type
-    and that stream is spliced in, so a break costs a seam rather than its full
-    duration. Without it an ad pod still means no output.
+    One source feeds the window per poll, chosen in this order:
+
+    1. the native stream, when it is clean;
+    2. a clean backup on another player type, when one has been found;
+    3. the ad itself.
+
+    Never nothing. Cutting a pod out leaves a hole the length of the break, and
+    ffmpeg's HLS demuxer ignores `#EXT-X-DISCONTINUITY` (trac #5419), so that
+    hole reaches Jellyfin as an uncompensated timestamp jump and desyncs audio by
+    the length of what was removed, cumulatively across a session. An ad that
+    plays is a far smaller cost than a stream that drifts apart, so the ad wins
+    whenever nothing better is available.
+
+    `backup` enables TTV-AB-style substitution and is None unless the configured
+    strategy uses it. `egress_flip` is the TTV LOL PRO recovery - re-resolving
+    from the other side of the proxy - and must stay off for the others, because
+    it moves the session to a different weaver node mid-break.
     """
     key = session_key(login, quality, variant)
     session = await _get_or_create(key, login, quality)
@@ -827,23 +861,61 @@ async def get_playlist(
             raise
 
         session.stats.polls += 1
-        removed, ad_pod = _advance(
-            session, parsed, strip_ads=strip_ads, rewrite_uri=rewrite_uri, now=now
-        )
-        session.stats.removed_segments += removed
 
+        # Would stripping empty this poll? Decided before anything is folded,
+        # because it is what selects the source.
+        ad_pod = bool(
+            strip_ads and parsed.segments and all(s.is_ad for s in parsed.segments)
+        )
+        # The ad-only run is counted here, not in `_advance`, because it is a
+        # property of the *native* stream: passing a pod through commits ad
+        # segments as ordinary content, and a backup splice commits somebody
+        # else's content, so neither says anything about whether the break ended.
+        if ad_pod:
+            session.consecutive_ad_polls += 1
+            session.stats.ad_pod_polls += 1
+            _distrust_titles_if_endless(session, parsed)
+            if egress_flip:
+                _request_ad_replacement(session)
+        else:
+            session.consecutive_ad_polls = 0
+
+        served_backup = False
         if backup is not None:
-            ad_pod = await _apply_backup(
+            served_backup = await _apply_backup(
                 session,
                 backup,
                 ad_pod=ad_pod,
-                parsed=parsed,
                 fetch=fetch,
                 rewrite_uri=rewrite_uri,
                 now=now,
             )
 
-        render = _render(session, ad_pod=ad_pod)
+        removed = 0
+        if not served_backup:
+            # `strip_ads and not ad_pod` is the whole policy: strip ads out of a
+            # window that still has real content either side of them, but when
+            # the entire window is advertising and no backup could replace it,
+            # pass it through rather than cutting a hole in the timeline.
+            if ad_pod:
+                log.info(
+                    "ad pod with no backup - passing it through to keep the "
+                    "timeline continuous",
+                    login=session.login,
+                    segments=len(parsed.segments),
+                    consecutive=session.consecutive_ad_polls,
+                )
+            removed = _advance(
+                session,
+                parsed,
+                strip_ads=strip_ads and not ad_pod,
+                rewrite_uri=rewrite_uri,
+                now=now,
+            )
+        session.stats.removed_segments += removed
+
+        render = _render(session)
+        render.ad_pod = ad_pod
         render.removed_segments = removed
         render.backup_player_type = (
             session.backup.active.player_type
@@ -860,6 +932,22 @@ def touch(login: str, quality: str, variant: str | None = None) -> None:
     session = _sessions.get(session_key(login, quality, variant))
     if session is not None:
         session.last_access = time.monotonic()
+
+
+def touch_any(login: str) -> None:
+    """Keep every session for this channel alive.
+
+    The segment endpoint knows the login but not the quality, and looking the
+    quality up meant a database round-trip on the hottest path in the app - once
+    per segment, per viewer. A channel has one or two sessions at most, so
+    touching all of them is both cheaper and immune to getting the key wrong,
+    which is how a session with a per-channel quality override used to be swept
+    out from under a live client.
+    """
+    now = time.monotonic()
+    for session in _sessions.values():
+        if session.login == login:
+            session.last_access = now
 
 
 def get(login: str, quality: str, variant: str | None = None) -> StreamSession | None:
@@ -909,11 +997,27 @@ def sweep(now: float | None = None) -> int:
     return len(dead)
 
 
+async def _reap_orphan_normalisers() -> None:
+    """Stop any encoder whose session has gone.
+
+    An encoder is a real process and a directory of video; leaving one running
+    for a channel nobody is watching costs a core. Imported here rather than at
+    module scope so this module stays the lower layer of the two.
+    """
+    from app.services import normaliser
+
+    live = set(_sessions)
+    for key in normaliser.active_keys():
+        if key not in live:
+            await normaliser.stop(key)
+
+
 async def sweeper_task(interval: float = 30.0) -> None:
     while True:
         try:
             await asyncio.sleep(interval)
             sweep()
+            await _reap_orphan_normalisers()
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - the sweeper must never die
@@ -954,10 +1058,13 @@ async def preview(
     )
     before = live.snapshot(now) if live is not None else {"exists": False}
 
-    removed, ad_pod = _advance(
-        session, parsed, strip_ads=strip_ads, rewrite_uri=rewrite_uri, now=now
+    # Mirrors the source choice `get_playlist` makes, minus the backup search:
+    # an all-ad poll is passed through rather than cut.
+    ad_pod = bool(strip_ads and parsed.segments and all(s.is_ad for s in parsed.segments))
+    removed = _advance(
+        session, parsed, strip_ads=strip_ads and not ad_pod, rewrite_uri=rewrite_uri, now=now
     )
-    render = _render(session, ad_pod=ad_pod)
+    render = _render(session)
 
     return {
         "login": login,

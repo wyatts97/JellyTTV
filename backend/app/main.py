@@ -25,7 +25,7 @@ from app.routers import (
     tuner,
 )
 from app.services import http as shared_http
-from app.services import stream_session
+from app.services import normaliser, stream_session
 from app.services.events import close_redis
 from app.services.settings_store import get_settings_row
 from app.worker.queue import close_pool, coalesced_job_id, enqueue
@@ -61,6 +61,10 @@ async def lifespan(app: FastAPI):
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        # Encoders are child processes holding open pipes; leaving them behind
+        # on shutdown orphans both them and their work directories.
+        for key in normaliser.active_keys():
+            await normaliser.stop(key)
         await shared_http.aclose()
         await close_pool()
         await close_redis()

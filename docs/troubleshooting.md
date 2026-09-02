@@ -94,7 +94,7 @@ side by side, plus per-segment detail. What to look for:
 
 | Field | Meaning |
 |---|---|
-| `AD[daterange]` on most/all segments | Ad detection is over-matching. If the playlist would be emptied, JellyTTV passes it through instead and logs `ad strip would empty the playlist` — you get ads, not a crash. |
+| `AD[daterange]` on most/all segments | Ad detection is over-matching. If stripping would empty the playlist, JellyTTV passes the pod through instead and logs `ad pod with no backup - passing it through` — you get ads, not a hole. |
 | `low latency: True` with `dropped=` | Twitch sent LL-HLS tags. These are dropped deliberately; their URIs are relative to the upstream host and would break any client that followed them. |
 | `session` → `media_sequence` | Must only ever increase. Poll a few times; if it moves backwards, that is a bug worth reporting. |
 | `upstream mseq` vs session `media_sequence` | They are unrelated by design. JellyTTV assigns its own sequence numbers so ad removal and weaver switches stay invisible to the player. |
@@ -105,9 +105,61 @@ bookkeeping and how many times it has had to re-resolve. A steadily climbing
 
 Add `?refresh=1` to force a fresh streamlink resolve and start a new session.
 
+## Audio drifts out of sync with video
+
+Specifically: a few stutters or freezes, then the picture returns with audio
+seconds behind — and the gap grows over a session rather than recovering.
+
+The delay is not arbitrary. **It is the amount of content removed from the
+timeline.** ffmpeg's HLS demuxer does not implement `#EXT-X-DISCONTINUITY`
+([ffmpeg trac #5419](https://trac.ffmpeg.org/ticket/5419)), and Jellyfin's web
+client cannot avoid that demuxer — a live HLS source is not in jellyfin-web's
+DirectPlayProfiles, so playback falls back to server-side ffmpeg even though
+hls.js would have handled the discontinuity. So any hole cut in the stream
+arrives as a raw timestamp jump, which video and audio absorb differently.
+
+JellyTTV therefore never cuts a hole. When an ad break cannot be covered by a
+clean backup stream, **the ad plays** — a continuous stream with an ad in it
+beats a stream that drifts apart permanently. That is deliberate, not a
+regression, and it is why you may see more ads than before.
+
+If you still see drift:
+
+- Confirm it from Jellyfin's side. Its transcode log (`/var/log/jellyfin/
+  ffmpeg-transcode-*.log`, or Dashboard → Logs) shows the exact ffmpeg command
+  and any `Non-monotonous DTS` / timestamp-jump warnings. **A reported jump
+  close to the length of an ad break is this bug**; no warnings means the cause
+  is elsewhere.
+- `GET /api/debug/hls/sessions` — `ad_pod_polls` should stay low. A large count
+  means breaks are being detected constantly, which is worth reporting.
+- Check for `timeline gap detected from program-date-time` in the API log. That
+  is JellyTTV noticing upstream itself skipped time; it marks the seam, but
+  ffmpeg will still ignore the marker. Frequent occurrences point at a flaky
+  connection to Twitch rather than at ad handling.
+- If drift persists across all of that, enable **Settings → Re-encode to a
+  continuous output**. It runs a dedicated encoder per channel and discards
+  upstream timestamps entirely, which makes the problem impossible by
+  construction — at the cost of roughly 1.5–3 CPU cores per 1080p60 channel in
+  software. Pick a hardware encoder if your host has one.
+
+## The stream freezes during ad breaks with re-encoding on
+
+Expected when nothing can cover the break. Re-encoding fixes *timing*, not
+missing content: while an ad plays on our token, Twitch is not sending the
+broadcaster's video at all, so there is nothing to encode. What you get is a
+clean freeze and an in-sync resume, rather than a desync.
+
+Coverage comes from the backup search, not the encoder. `stats.backup_polls` in
+`GET /api/debug/hls/sessions` is how often a break was actually covered — if it
+stays at zero, the encoder is costing you CPU for nothing and should go back
+off. A Turbo subscription or a per-channel sub is the only thing that removes
+ads upstream and so avoids the question entirely.
+
 ## Ads still play
 
 - Ad stripping only works with **Settings → Proxy playlists through JellyTTV** enabled.
+- A break that no clean backup could cover plays the ad on purpose. See
+  "Audio drifts out of sync with video" for why cutting it is worse.
 - Twitch changes its ad-stitching format periodically. Set `JELLYTTV_LOG_LEVEL=DEBUG` and look for
   `stripped twitch ad segments`. If the count is always 0 during an ad break, the detection heuristic
   needs updating — it lives in one small file, `backend/app/services/hls.py`, with tests in

@@ -29,10 +29,15 @@ PLAYLIST_TIMEOUT = httpx.Timeout(10.0, connect=5.0, read=10.0)
 SEGMENT_TIMEOUT = httpx.Timeout(60.0, connect=5.0, read=60.0)
 IMAGE_TIMEOUT = httpx.Timeout(10.0, connect=5.0, read=10.0)
 
+# Segment bodies are held open for their whole transfer, so the ceiling is
+# shared between large downloads and the tiny playlist polls that must never
+# queue behind them. Keepalive matches the total: capping it lower meant the
+# pool closed sockets it was about to need again, paying a fresh TLS handshake
+# on the hot path this module exists to keep warm.
 _LIMITS = httpx.Limits(
-    max_keepalive_connections=20,
-    max_connections=50,
-    keepalive_expiry=30.0,
+    max_keepalive_connections=200,
+    max_connections=200,
+    keepalive_expiry=60.0,
 )
 
 _client: httpx.AsyncClient | None = None

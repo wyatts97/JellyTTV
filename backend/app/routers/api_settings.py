@@ -11,7 +11,7 @@ from app.logging_conf import get_logger
 from app.schemas import ConnectionTest, JellyfinLibraryOut, SettingsOut, SettingsUpdate, settings_out
 from app.security import AdminUser
 from app.services import eventsub as eventsub_service
-from app.services import notifications, resolver, stream_session
+from app.services import normaliser, notifications, resolver, stream_session
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import get_settings, get_settings_row, update_settings
 from app.services.twitch import TwitchClient, TwitchError
@@ -45,6 +45,8 @@ async def write_settings(
         before.row.ad_backup_low_quality,
         before.row.strip_ads,
         before.row.default_quality,
+        before.row.normalise_output,
+        before.row.normalise_hwaccel,
     )
 
     values = payload.model_dump(exclude_unset=True)
@@ -84,9 +86,16 @@ async def write_settings(
         settings.row.ad_backup_low_quality,
         settings.row.strip_ads,
         settings.row.default_quality,
+        settings.row.normalise_output,
+        settings.row.normalise_hwaccel,
     ):
         resolver.invalidate()
         stream_session.reset()
+        # Encoders are built from these settings, so a change means the running
+        # ones are wrong. Stopping them here rather than waiting for the sweeper
+        # is what makes a settings change take effect on the next poll.
+        for key in normaliser.active_keys():
+            await normaliser.stop(key)
         log.info(
             "stream settings changed; dropped resolver cache and sessions",
             player_type=settings.row.twitch_player_type,

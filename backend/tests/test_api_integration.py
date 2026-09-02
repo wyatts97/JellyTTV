@@ -335,7 +335,12 @@ async def test_ad_block_strategy_defaults_to_backup_stream(client: httpx.AsyncCl
 
     body = (await client.get("/api/settings")).json()
     assert body["ad_block_strategy"] == "ttv_ab"
-    assert body["ad_backup_low_quality"] is True
+    # Off by default: a backup at another resolution is a mid-playlist format
+    # change, and nothing downstream can absorb one unless the normaliser is
+    # running. See the note on the model field.
+    assert body["ad_backup_low_quality"] is False
+    assert body["normalise_output"] is False
+    assert body["normalise_hwaccel"] == "none"
     assert body["ad_spoofing"] is True
 
     switched = await client.put("/api/settings", json={"ad_block_strategy": "ttv_lol_pro"})

@@ -109,12 +109,27 @@ class Settings(SQLModel, table=True):
     # resolves to the default - see services.adblock.
     ad_block_strategy: str | None = None
     # Allow a lower-quality backup when nothing clean exists at the stream's own
-    # quality. TTV-AB's "Low Quality Fallback"; picture keeps moving at the cost
-    # of resolution for the length of the break.
-    ad_backup_low_quality: bool = True
+    # quality. TTV-AB's "Low Quality Fallback".
+    #
+    # Off unless `normalise_output` is on, and forced off when it is not. A
+    # backup at another resolution is a mid-playlist format change, and the only
+    # thing signalling it is a discontinuity tag that ffmpeg ignores - so the
+    # decoder keeps its old context and the picture freezes. TTV-AB gets away
+    # with this because it can reload the player at the seam; we cannot. With the
+    # normaliser running every source is re-encoded to one fixed format, so the
+    # mismatch never reaches Jellyfin and the fallback becomes safe again.
+    ad_backup_low_quality: bool = False
     # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
     # watched that were not; separate from blocking and independently toggleable.
     ad_spoofing: bool = True
+    # Re-encode every source into one continuous, format-stable HLS output
+    # instead of handing Jellyfin the upstream segments. Costs a full transcode
+    # per active channel on top of Jellyfin's own, which is why it is off by
+    # default; what it buys is that no upstream timestamp jump or rendition
+    # change can reach the player. See services.normaliser.
+    normalise_output: bool = False
+    # Encoder to use when normalising: "none" (libx264), "vaapi", "nvenc", "qsv".
+    normalise_hwaccel: str = "none"
     default_quality: str = "best"
     guide_window_hours: int = 48
 

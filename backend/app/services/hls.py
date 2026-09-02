@@ -23,6 +23,7 @@ in one small module on purpose: cheap to test, cheap to fix.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
@@ -480,10 +481,19 @@ def render_media_playlist(
     passthrough_tags: Sequence[str] = (),
 ) -> str:
     """Render committed segments as a media playlist."""
+    # RFC 8216 6.3.3: no segment may exceed TARGETDURATION. `round` broke that -
+    # Twitch nominally sends 2s segments but real EXTINF values drift above 2.5
+    # on a keyframe shift, and a declared 2 then understates the window. Players
+    # size their buffer and their reload interval off this number, so
+    # understating it makes them poll early and re-poll into an unchanged
+    # playlist. Ceil over what is actually in the window, not just what upstream
+    # claimed.
+    longest = max((s.duration for s in segments), default=0.0)
+    declared = max(1, math.ceil(max(target_duration, longest) - 1e-6))
     lines = [
         "#EXTM3U",
         f"#EXT-X-VERSION:{version}",
-        f"#EXT-X-TARGETDURATION:{max(1, int(round(target_duration)))}",
+        f"#EXT-X-TARGETDURATION:{declared}",
         f"#EXT-X-MEDIA-SEQUENCE:{media_sequence}",
     ]
     if discontinuity_sequence:

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Channel, SeasonScheme, Settings, Vod, VodMode, VodState
 from app.services.adblock import STRATEGIES, configured_strategy
+from app.services.normaliser import HWACCELS
 from app.services.resolver import (
     PLAYER_TYPES,
     configured_proxy,
@@ -67,6 +68,8 @@ class SettingsUpdate(BaseModel):
     ad_block_strategy: Literal[STRATEGIES] | None = None  # type: ignore[valid-type]
     ad_backup_low_quality: bool | None = None
     ad_spoofing: bool | None = None
+    normalise_output: bool | None = None
+    normalise_hwaccel: Literal[HWACCELS] | None = None  # type: ignore[valid-type]
     default_quality: str | None = None
     guide_window_hours: int | None = Field(default=None, ge=6, le=336)
 
@@ -114,6 +117,8 @@ class SettingsOut(BaseModel):
     ad_block_strategy: str
     ad_backup_low_quality: bool
     ad_spoofing: bool
+    normalise_output: bool
+    normalise_hwaccel: str
     default_quality: str
     guide_window_hours: int
 
@@ -321,6 +326,8 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         ad_block_strategy=configured_strategy(row.ad_block_strategy),
         ad_backup_low_quality=row.ad_backup_low_quality,
         ad_spoofing=row.ad_spoofing,
+        normalise_output=row.normalise_output,
+        normalise_hwaccel=row.normalise_hwaccel,
         default_quality=row.default_quality,
         guide_window_hours=row.guide_window_hours,
         default_vod_mode=row.default_vod_mode,

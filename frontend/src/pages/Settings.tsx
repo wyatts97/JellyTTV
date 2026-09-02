@@ -413,7 +413,7 @@ export default function Settings() {
                 {[
                   ['ttv_ab', 'Backup stream (recommended)'],
                   ['ttv_lol_pro', 'Ad-free region proxy'],
-                  ['strip_only', 'Remove ads only — gap during breaks'],
+                  ['strip_only', 'Remove ads only — ad plays if it cannot be replaced'],
                 ].map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
@@ -424,11 +424,40 @@ export default function Settings() {
           </div>
           <Toggle
             checked={Boolean(get('ad_backup_low_quality'))}
-            disabled={get('ad_block_strategy') !== 'ttv_ab' || !get('strip_ads')}
+            disabled={
+              get('ad_block_strategy') !== 'ttv_ab' ||
+              !get('strip_ads') ||
+              !get('normalise_output')
+            }
             onChange={(v) => set('ad_backup_low_quality', v)}
             label="Allow lower quality during ad breaks"
-            description="If no clean backup exists at your normal quality, drop as low as 360p to keep the picture moving, then restore it afterwards. Off means breaks fall back to a gap when only a lower-quality source is clean."
+            description="If no clean backup exists at your normal quality, drop as low as 360p to cover the break. Requires re-encoding: switching resolution mid-stream freezes Jellyfin's decoder unless every source is re-encoded to one shape first. Without it, breaks that only a lower-quality source could cover play the ad instead."
           />
+          <Toggle
+            checked={Boolean(get('normalise_output'))}
+            onChange={(v) => set('normalise_output', v)}
+            label="Re-encode to a continuous output"
+            description="Runs a dedicated encoder per active channel so Jellyfin always receives one unbroken, fixed-format stream. Guarantees audio never drifts out of sync and lets any backup cover an ad break. Costs a full transcode per viewer on top of Jellyfin's own — roughly 1.5–3 CPU cores per 1080p60 channel in software — and adds a few seconds of latency."
+          />
+          {Boolean(get('normalise_output')) && (
+            <Field label="Encoder">
+              <Select
+                value={String(get('normalise_hwaccel') ?? 'none')}
+                onChange={(e) => set('normalise_hwaccel', e.target.value)}
+              >
+                {[
+                  ['none', 'Software (libx264)'],
+                  ['vaapi', 'VAAPI (Intel/AMD)'],
+                  ['nvenc', 'NVENC (NVIDIA)'],
+                  ['qsv', 'Quick Sync (Intel)'],
+                ].map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
           <Toggle
             checked={Boolean(get('ad_spoofing'))}
             onChange={(v) => set('ad_spoofing', v)}
