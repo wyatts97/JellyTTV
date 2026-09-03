@@ -97,12 +97,40 @@ def test_a_transport_error_is_forgiven_much_faster_than_an_ad():
     )
 
 
-def test_strategy_falls_back_to_ttv_ab_for_null_or_nonsense():
-    """NULL is what an upgraded database reads back for a new column."""
-    assert adblock.configured_strategy(None) == adblock.STRATEGY_TTV_AB
-    assert adblock.configured_strategy("") == adblock.STRATEGY_TTV_AB
-    assert adblock.configured_strategy("nonsense") == adblock.STRATEGY_TTV_AB
-    assert adblock.configured_strategy("ttv_lol_pro") == adblock.STRATEGY_TTV_LOL_PRO
+def test_the_rotation_leads_with_the_fast_bridge():
+    """Coverage first, resolution second.
+
+    The old ordering walked every player type at the session's own quality before
+    giving up any resolution, so a break could cost four sequential streamlink
+    spawns - one per poll - before anything covered it. `autoplay` at 360p is the
+    quickest thing to come back clean, so it goes first and the break is covered
+    on the first attempt; the session then trades up behind it.
+    """
+    state = adblock.BackupState()
+    plan = state.build_plan(native_player_type="site", quality="1080p60", now=0.0)
+
+    assert plan[0] == (adblock.FAST_BRIDGE_QUALITY, adblock.FAST_BRIDGE_TYPE)
+    # Then the session's own quality on every other type, before anything
+    # degrades: three entries here, since `site` is native and `autoplay` is
+    # already spent on the bridge.
+    others = [pt for pt in adblock.BACKUP_PLAYER_TYPES if pt not in ("site", "autoplay")]
+    assert plan[1 : 1 + len(others)] == [("1080p60", pt) for pt in others]
+    assert all(pt != "site" for _, pt in plan), "the native type must not be tried"
+    assert len(plan) == len(set(plan)), "a pair must not be probed twice"
+
+
+def test_the_upgrade_probe_will_not_settle_for_another_degraded_rendition():
+    """Trading one low rendition for another buys a seam and no picture."""
+    state = adblock.BackupState()
+    plan = state.build_plan(
+        native_player_type="site", quality="1080p60", now=0.0, full_quality_only=True
+    )
+
+    assert plan, "the upgrade probe had nothing to try"
+    assert {q for q, _ in plan} == {"1080p60"}
+    assert all(pt != adblock.FAST_BRIDGE_TYPE for _, pt in plan), (
+        "the bridge type is what we are trying to get away from"
+    )
 
 
 async def test_the_search_tries_player_types_until_one_comes_back_clean():
@@ -168,6 +196,8 @@ async def test_the_search_gives_up_when_every_type_carries_the_ad():
     original = resolver.resolve_live
     resolver.resolve_live = fake_resolve
     try:
+        # `full_quality_only` keeps the rotation to one pass, so the whole
+        # plan is walked in as many calls as there are usable player types.
         for _ in range(len(adblock.BACKUP_PLAYER_TYPES) + 1):
             found = await adblock.find_backup(
                 login="chan",
@@ -175,7 +205,7 @@ async def test_the_search_gives_up_when_every_type_carries_the_ad():
                 native_player_type="site",
                 state=state,
                 fetch=fake_fetch,
-                allow_low_quality=False,
+                full_quality_only=True,
             )
             assert found is None
     finally:

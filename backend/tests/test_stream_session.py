@@ -84,12 +84,18 @@ def make_fetch(playlists: list[str]):
 def make_resolve(url: str = "https://video-weaver.a.hls.ttvnw.net/v1/playlist/x.m3u8"):
     calls = {"n": 0}
 
-    async def resolve(prefer_direct: bool = False) -> str:
+    async def resolve() -> str:
         calls["n"] += 1
-        calls["prefer_direct"] = prefer_direct
         return url
 
     return resolve, calls
+
+
+HOLD_URI_PREFIX = "https://jellyttv.test/hls/adapt/hold?seq="
+
+
+def hold_uri(seq: int) -> str:
+    return f"{HOLD_URI_PREFIX}{seq}"
 
 
 async def poll_all(
@@ -97,9 +103,14 @@ async def poll_all(
     *,
     strip_ads: bool = True,
     login: str = "adapt",
-    egress_flip: bool = False,
+    backup=None,
+    with_hold: bool = False,
 ):
-    """Feed each playlist through the session in order, collecting the output."""
+    """Feed each playlist through the session in order, collecting the output.
+
+    `with_hold` wires up the hold segment without a backup finder, which is the
+    shape of a break that no player type could cover.
+    """
     fetch, _ = make_fetch(playlists)
     resolve, resolve_calls = make_resolve()
     out = []
@@ -110,12 +121,17 @@ async def poll_all(
             strip_ads=strip_ads,
             resolve=resolve,
             fetch=fetch,
-            egress_flip=egress_flip,
+            backup=backup,
+            hold_uri=hold_uri if (with_hold or backup is not None) else None,
         )
         out.append(render)
         # Defeat the 1s render cache: each call must be treated as a fresh poll.
         session = stream_session.get(login, "best")
         session.last_render_at = 0.0
+        # The backup search runs detached, so it needs a turn of the event loop
+        # to finish. In production every poll awaits real network I/O and yields
+        # many times over; these fakes never block, so yield explicitly.
+        await asyncio.sleep(0)
     return out, resolve_calls
 
 
@@ -287,18 +303,19 @@ async def test_a_duration_less_pod_does_not_leak_its_tail_into_the_window():
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_a_full_ad_pod_is_passed_through_to_keep_the_timeline_whole():
-    """Why an unblocked ad beats a hole in the stream.
+async def test_a_full_ad_pod_is_held_over_never_shown():
+    """An ad break shows a hold, not the ad, and never a hole.
 
-    When every segment upstream is an ad and no backup could replace it, the pod
-    plays. Cutting it out instead removes its whole duration from the media
-    timeline, and ffmpeg's HLS demuxer ignores `#EXT-X-DISCONTINUITY` (trac
-    #5419), so the jump reaches Jellyfin uncompensated and leaves audio behind by
-    the length of the break - permanently, and cumulatively across a session.
+    Three outcomes were possible here and two of them are wrong. Serving the ad
+    shows the ad. Serving *nothing* removes the break's whole duration from the
+    media timeline, and ffmpeg's HLS demuxer ignores `#EXT-X-DISCONTINUITY`
+    (trac #5419), so the jump reaches Jellyfin uncompensated and leaves audio
+    behind by the length of the break - permanently, and cumulatively across a
+    session.
 
-    So the ad is served, no discontinuity is introduced, and playback continues
-    in sync. Ad avoidance is what the backup search is for; when it has nothing
-    to offer, an ad is the cheaper failure.
+    The hold is the third option: our own black, silent, decodable second, so
+    the timeline keeps advancing at real time with nothing missing from it. The
+    picture waits instead of drifting, and no ad is ever committed.
     """
     # An 8-segment (16s) pod, so it spans two consecutive polls.
     playlists = [
@@ -307,25 +324,71 @@ async def test_a_full_ad_pod_is_passed_through_to_keep_the_timeline_whole():
         build_playlist(start_seq=108, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
         build_playlist(start_seq=112, count=4),  # break ends, content resumes
     ]
-    renders, _ = await poll_all(playlists)
+    renders, _ = await poll_all(playlists, with_hold=True)
 
-    # The pod is still recognised - it is served deliberately, not missed.
+    # The pod is still recognised - it is covered deliberately, not missed.
     assert [r.ad_pod for r in renders] == [False, True, True, False]
     assert all(r.segment_count > 0 for r in renders), "the player must never starve"
-    assert "ad104.ts" in renders[1].text, "the pod was cut instead of played"
 
-    # The point of serving it: no hole, so nothing to mark and nothing to drift.
-    assert renders[1].removed_segments == 0
-    assert "#EXT-X-DISCONTINUITY" not in renders[1].text
-
-    # Real content from both sides of the break still gets through.
-    assert "seg100.ts" in renders[0].text
-    assert "seg112.ts" in renders[-1].text
-    assert_playlist_continuity([r.text for r in renders])
+    joined = "\n".join(r.text for r in renders)
+    assert "ad104.ts" not in joined, "an ad segment reached the client"
+    assert HOLD_URI_PREFIX in renders[1].text, "the break was not held"
 
     session = stream_session.get("adapt", "best")
-    assert session.stats.ad_pod_polls == 2
-    assert session.consecutive_ad_polls == 0, "the run must reset when content resumes"
+    assert session.stats.hold_segments == 2, "one hold per ad poll"
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_a_hold_run_opens_one_discontinuity_not_one_per_segment():
+    """DISCONTINUITY-SEQUENCE has to stay meaningful across a long break.
+
+    A marker per hold segment would inflate the count as they scroll off, and a
+    player that trusts it - which is the point of the field - would lose its
+    place. The hold is one source, so it is one seam in and one seam out.
+    """
+    playlists = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(6)
+    ]
+    renders, _ = await poll_all(playlists, with_hold=True)
+
+    session = stream_session.get("adapt", "best")
+    assert session.stats.hold_segments >= 6, "the break should have spanned many polls"
+
+    holds = [u for u in _URI.findall(renders[-1].text) if u.startswith(HOLD_URI_PREFIX)]
+    assert len(holds) == len(set(holds)), "a repeated hold uri would stall the playlist"
+
+    # One marker for the seam into the hold. The window has long since rolled
+    # past the native content, so nothing else in it is a new source.
+    assert renders[-1].text.count("#EXT-X-DISCONTINUITY\n") <= 1
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_the_hold_ends_and_marks_the_seam_when_content_returns():
+    """Leaving the hold is a source change like any other, and must be marked."""
+    playlists = [
+        build_playlist(start_seq=100, count=4),
+        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=108, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=112, count=4),
+        build_playlist(start_seq=116, count=4),
+    ]
+    renders, _ = await poll_all(playlists, with_hold=True)
+
+    session = stream_session.get("adapt", "best")
+    assert session.holding is False, "the hold run never closed"
+
+    # The window still holds native content from before the break, so what
+    # matters is the segment immediately following the last hold - not the first
+    # video-weaver uri in the playlist.
+    blocks = list(_SEGMENT_BLOCK.finditer(renders[3].text))
+    last_hold = max(
+        i for i, b in enumerate(blocks) if b.group("uri").startswith(HOLD_URI_PREFIX)
+    )
+    assert last_hold + 1 < len(blocks), "content did not resume"
+    resumed = blocks[last_hold + 1]
+    assert resumed.group("uri").startswith("https://video-weaver")
+    assert resumed.group("disc"), "the seam out of the hold was not marked"
 
 
 def build_backup_playlist(*, start_seq: int, count: int = 4) -> str:
@@ -373,7 +436,7 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
             return 200, playlist
         return await native_fetch(url)
 
-    async def find_backup(state, quality):
+    async def find_backup(state, quality, full_quality_only=False):
         return stream_session.BackupCandidate(
             player_type="embed",
             quality=quality,
@@ -447,7 +510,7 @@ async def test_native_resumes_only_after_several_clean_polls():
             return 200, playlist
         return await native_fetch(url)
 
-    async def find_backup(state, quality):
+    async def find_backup(state, quality, full_quality_only=False):
         return stream_session.BackupCandidate(
             player_type="embed", quality=quality, url=backup_url, playlist=""
         )
@@ -472,80 +535,6 @@ async def test_native_resumes_only_after_several_clean_polls():
     assert serving == [False, False, True, True, True, False], (
         "expected the backup to be held across the first clean polls"
     )
-
-
-async def test_an_ad_pod_triggers_one_re_resolve_from_the_other_egress():
-    """Go and get a different stream rather than waiting the break out.
-
-    An ad is baked in when Twitch mints the playback token, so a fresh token
-    from a different egress often comes back clean. Flipping the proxied/direct
-    polarity is what makes the retry meaningfully different, since the thing
-    that changes the outcome is the IP Twitch sees.
-
-    This is TTV LOL PRO's move and only its move, so the caller has to ask for
-    it. It lands the session on a different weaver node, which is a seam in the
-    stream - worth paying when the token is the only lever available, and not
-    worth paying under TTV-AB, where the backup search already gets a clean one.
-    """
-    playlists = [
-        build_playlist(start_seq=100, count=4),
-        build_playlist(start_seq=104, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
-        build_playlist(start_seq=108, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
-        build_playlist(start_seq=112, count=4),
-    ]
-    fetch, _ = make_fetch(playlists)
-    resolve, resolve_calls = make_resolve()
-
-    for _ in playlists:
-        await stream_session.get_playlist(
-            login="adapt",
-            quality="best",
-            strip_ads=True,
-            resolve=resolve,
-            fetch=fetch,
-            egress_flip=True,
-        )
-        stream_session.get("adapt", "best").last_render_at = 0.0
-
-    session = stream_session.get("adapt", "best")
-    # Exactly one replacement for the whole break: retrying every poll would
-    # respawn streamlink several times a second for the length of a midroll.
-    assert session.stats.ad_replacements == 1
-    assert session.prefer_direct_resolve is True, "polarity did not flip"
-    assert resolve_calls["prefer_direct"] is True, "the resolver was not told to go direct"
-
-
-async def test_the_polarity_flip_is_capped_not_repeated_every_poll():
-    """A long break must not thrash streamlink once per poll."""
-    playlists = [build_playlist(start_seq=100, count=4)] + [
-        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
-        for i in range(8)
-    ]
-    await poll_all(playlists, egress_flip=True)
-    session = stream_session.get("adapt", "best")
-
-    assert session.stats.ad_pod_polls >= 6, "the break should have spanned many polls"
-    assert session.stats.ad_replacements == 1, "one replacement per break, not per poll"
-
-
-async def test_the_polarity_flip_is_off_unless_the_caller_asks_for_it():
-    """Only TTV LOL PRO pays for a weaver switch to escape an ad.
-
-    Under every other strategy the flip fired anyway, so each ad break moved the
-    session onto a different `video-weaver` node - a different encoder instance
-    whose timestamps are not promised to continue the old one's - in exchange
-    for nothing.
-    """
-    playlists = [build_playlist(start_seq=100, count=4)] + [
-        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
-        for i in range(4)
-    ]
-    await poll_all(playlists)
-    session = stream_session.get("adapt", "best")
-
-    assert session.stats.ad_pod_polls >= 3, "the break should have spanned many polls"
-    assert session.stats.ad_replacements == 0, "no egress flip was asked for"
-    assert session.prefer_direct_resolve is False
 
 
 def build_amazon_titled_playlist(*, start_seq: int, count: int = 4) -> str:
@@ -805,3 +794,106 @@ async def test_target_duration_is_never_below_the_longest_segment():
     declared = int(re.search(r"#EXT-X-TARGETDURATION:(\d+)", text).group(1))
     longest = max(float(d) for d in re.findall(r"#EXTINF:([\d.]+),", text))
     assert declared >= longest, f"TARGETDURATION {declared} understates a {longest}s segment"
+
+
+async def test_a_low_quality_bridge_is_upgraded_once_it_has_held():
+    """The fast bridge buys coverage, not resolution - so it must not be final.
+
+    `autoplay`/360p is reached for first because it is the quickest thing to come
+    back clean, which is what covers a break on the first probe instead of the
+    fourth. Nobody wants to watch a whole midroll at 360p, so once it has carried
+    BRIDGE_HOLD_SECONDS a full-quality candidate is looked for behind it and
+    swapped in if one exists.
+    """
+    native = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(6)
+    ]
+    bridge_url = "https://video-weaver.b.hls.ttvnw.net/bridge.m3u8"
+    full_url = "https://video-weaver.c.hls.ttvnw.net/full.m3u8"
+    backup_seq = {"n": 200}
+    native_fetch, _ = make_fetch(native)
+
+    async def fetch(url: str):
+        if url in (bridge_url, full_url):
+            playlist = build_backup_playlist(start_seq=backup_seq["n"])
+            backup_seq["n"] += 4
+            return 200, playlist
+        return await native_fetch(url)
+
+    async def find_backup(state, quality, full_quality_only=False):
+        if full_quality_only:
+            return stream_session.BackupCandidate(
+                player_type="embed", quality=quality, url=full_url, playlist="",
+                is_bridge=False,
+            )
+        return stream_session.BackupCandidate(
+            player_type="autoplay", quality="360p", url=bridge_url, playlist="",
+            is_bridge=True,
+        )
+
+    resolve, _ = make_resolve()
+    session = None
+    for _ in native:
+        await stream_session.get_playlist(
+            login="adapt", quality="best", strip_ads=True,
+            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        # Age the bridge past its hold window so the upgrade probe can fire.
+        if session.backup_promoted_at:
+            session.backup_promoted_at -= stream_session.BRIDGE_HOLD_SECONDS
+        await asyncio.sleep(0)
+
+    assert session.stats.bridge_upgrades == 1, "the bridge was never traded up"
+    assert session.backup.active.player_type == "embed"
+    assert session.backup.active.is_bridge is False
+
+
+async def test_the_bridge_upgrade_is_capped_per_break():
+    """Every swap is another seam; past a couple they cost more than they buy."""
+    native = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=400, ad_duration=800.0)
+        for i in range(12)
+    ]
+    bridge_url = "https://video-weaver.b.hls.ttvnw.net/bridge.m3u8"
+    backup_seq = {"n": 200}
+    native_fetch, _ = make_fetch(native)
+
+    async def fetch(url: str):
+        if url == bridge_url:
+            playlist = build_backup_playlist(start_seq=backup_seq["n"])
+            backup_seq["n"] += 4
+            return 200, playlist
+        return await native_fetch(url)
+
+    searches = {"upgrade": 0}
+
+    async def find_backup(state, quality, full_quality_only=False):
+        if full_quality_only:
+            # Nothing better exists - the probe keeps coming back empty.
+            searches["upgrade"] += 1
+            return None
+        return stream_session.BackupCandidate(
+            player_type="autoplay", quality="360p", url=bridge_url, playlist="",
+            is_bridge=True,
+        )
+
+    resolve, _ = make_resolve()
+    session = None
+    for _ in native:
+        await stream_session.get_playlist(
+            login="adapt", quality="best", strip_ads=True,
+            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        if session.backup_promoted_at:
+            session.backup_promoted_at -= stream_session.BRIDGE_HOLD_SECONDS
+        await asyncio.sleep(0)
+
+    assert searches["upgrade"] == stream_session.MAX_BRIDGE_UPGRADES, (
+        "the upgrade probe kept firing for the whole break"
+    )
+    assert session.serving_backup is True, "the bridge was dropped instead of held"

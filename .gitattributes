@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The ad-break hold segment is MPEG-TS, not TypeScript. Never eol-normalise it.
+backend/app/assets/hold.ts binary

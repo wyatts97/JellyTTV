@@ -20,5 +20,4 @@ config/
 .DS_Store
 playwright-report/
 test-results/
-ttv-lol-pro
 TTV-AB

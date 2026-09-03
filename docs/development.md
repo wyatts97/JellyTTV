@@ -20,12 +20,14 @@ backend/
       api_vods.py        VOD listing and per-VOD actions
       api_system.py      dashboard, jobs, logs, diagnostics, SSE feed
       tuner.py           M3U + XMLTV for Jellyfin's Live TV
-      hls.py             HLS proxy, ad stripping, VOD redirects
+      hls.py             HLS proxy, ad handling, hold segment, VOD redirects
       eventsub.py        Twitch webhook receiver
     services/
       twitch.py          Helix client + app-token lifecycle
       resolver.py        streamlink/yt-dlp -> playable url, with caching
       hls.py             playlist rewriting + Twitch ad detection  <-- most tested
+      adblock.py         backup-stream search across Twitch player types
+      stream_session.py  per-channel output continuity, ad-break coverage
       tuner.py           M3U / XMLTV generation
       library.py         .strm / NFO / artwork writing, pruning
       episodes.py        deterministic season/episode numbering
@@ -48,6 +50,28 @@ frontend/
     pages/               Setup, Login, Dashboard, Channels, Vods, Jobs, Settings
 docker/                  Dockerfile, entrypoint, Caddyfile
 ```
+
+## The ad-break hold segment
+
+`backend/app/assets/hold.ts` is the black, silent second served while an ad
+break is waiting on a clean backup stream. It is committed as a file rather than
+generated at runtime, deliberately: nothing on the playback path should need
+ffmpeg, and a break is the worst possible moment to discover it is missing.
+
+Regenerate it only if the shape needs to change:
+
+```bash
+ffmpeg -y \
+  -f lavfi -i color=c=black:s=640x360:r=30:d=1 \
+  -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
+  -shortest -c:v libx264 -profile:v baseline -g 30 -pix_fmt yuv420p \
+  -c:a aac -b:a 64k -f mpegts backend/app/assets/hold.ts
+```
+
+Baseline profile and a keyframe every frame are the point: it has to be
+decodable by anything, starting from any segment, with no reference to what
+played before it. It is marked `binary` in `.gitattributes` so the `.ts`
+extension does not get it treated as TypeScript and eol-normalised.
 
 ## Running without Docker
 

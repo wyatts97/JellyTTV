@@ -398,66 +398,8 @@ export default function Settings() {
             disabled={!get('proxy_enabled')}
             onChange={(v) => set('strip_ads', v)}
             label="Block ads"
-            description="Detects Twitch's stitched ad segments and keeps them out of the stream. Turn off to watch the raw Twitch feed, ads and all."
+            description="During a break, plays the same channel from a Twitch player type that isn't in that break — ads are stitched per stream token, so another token is usually still carrying the live video. Quality may drop for a few seconds while a clean source is found; if none exists yet the picture holds on black rather than showing the ad. Turn off to watch the raw Twitch feed, ads and all."
           />
-          <div className="pt-3">
-            <Field
-              label="Ad blocking strategy"
-              hint="Twitch decides whether to stitch an ad in when it issues the stream token, so a token issued for a different player type usually isn't in the same ad break. Backup stream exploits that: during a break it plays the same channel from a clean source, so the picture keeps moving instead of stopping."
-            >
-              <Select
-                value={String(get('ad_block_strategy') ?? 'ttv_ab')}
-                disabled={!get('strip_ads') || !get('proxy_enabled')}
-                onChange={(e) => set('ad_block_strategy', e.target.value)}
-              >
-                {[
-                  ['ttv_ab', 'Backup stream (recommended)'],
-                  ['ttv_lol_pro', 'Ad-free region proxy'],
-                  ['strip_only', 'Remove ads only — ad plays if it cannot be replaced'],
-                ].map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-          <Toggle
-            checked={Boolean(get('ad_backup_low_quality'))}
-            disabled={
-              get('ad_block_strategy') !== 'ttv_ab' ||
-              !get('strip_ads') ||
-              !get('normalise_output')
-            }
-            onChange={(v) => set('ad_backup_low_quality', v)}
-            label="Allow lower quality during ad breaks"
-            description="If no clean backup exists at your normal quality, drop as low as 360p to cover the break. Requires re-encoding: switching resolution mid-stream freezes Jellyfin's decoder unless every source is re-encoded to one shape first. Without it, breaks that only a lower-quality source could cover play the ad instead."
-          />
-          <Toggle
-            checked={Boolean(get('normalise_output'))}
-            onChange={(v) => set('normalise_output', v)}
-            label="Re-encode to a continuous output"
-            description="Runs a dedicated encoder per active channel so Jellyfin always receives one unbroken, fixed-format stream. Guarantees audio never drifts out of sync and lets any backup cover an ad break. Costs a full transcode per viewer on top of Jellyfin's own — roughly 1.5–3 CPU cores per 1080p60 channel in software — and adds a few seconds of latency."
-          />
-          {Boolean(get('normalise_output')) && (
-            <Field label="Encoder">
-              <Select
-                value={String(get('normalise_hwaccel') ?? 'none')}
-                onChange={(e) => set('normalise_hwaccel', e.target.value)}
-              >
-                {[
-                  ['none', 'Software (libx264)'],
-                  ['vaapi', 'VAAPI (Intel/AMD)'],
-                  ['nvenc', 'NVENC (NVIDIA)'],
-                  ['qsv', 'Quick Sync (Intel)'],
-                ].map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          )}
           <Toggle
             checked={Boolean(get('ad_spoofing'))}
             onChange={(v) => set('ad_spoofing', v)}
@@ -477,24 +419,6 @@ export default function Settings() {
             label="Keep offline channels in the tuner"
             description="Recommended: Jellyfin keys channels by id, so removing them churns its database and loses favourites."
           />
-          <div className="pt-3">
-            <Field
-              label="Ad-avoidance proxy"
-              hint={
-                current.twitch_proxy_active
-                  ? "Twitch decides whether to stitch an ad in when it issues the stream token, so requesting that token from a region carrying no ads is the only way to stop ads existing rather than cutting them out afterwards. Only the token and playlist lookups go through here — never your video, and never your account token. This is a third-party server run by volunteers: it can go down or start refusing requests, in which case JellyTTV silently falls back to a direct connection. Clear the field to disable. Point it at your own server for something you control."
-                  : "Disabled. A Twitch account token is set above, which already gives an ad-free stream, so the proxy is skipped — routing your credential through someone else's server would give it away for nothing. Clear the token to use a proxy instead."
-              }
-            >
-              <Input
-                type="text"
-                placeholder="http://host:port — empty to disable"
-                disabled={Boolean(current.twitch_user_token_set)}
-                value={String(get('twitch_proxy_url') ?? '')}
-                onChange={(e) => set('twitch_proxy_url', e.target.value)}
-              />
-            </Field>
-          </div>
           <div className="grid gap-4 pt-3 sm:grid-cols-2">
             <Field
               label="Twitch player type"

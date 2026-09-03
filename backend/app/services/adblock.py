@@ -36,18 +36,21 @@ log = get_logger(__name__)
 # low-quality fallback is allowed.
 BACKUP_PLAYER_TYPES = ("embed", "popout", "mobile_web", "autoplay", "site")
 
-# Ad-avoidance strategies, in the order they are offered.
-STRATEGY_TTV_AB = "ttv_ab"
-STRATEGY_TTV_LOL_PRO = "ttv_lol_pro"
-STRATEGY_STRIP_ONLY = "strip_only"
-STRATEGIES = (STRATEGY_TTV_AB, STRATEGY_TTV_LOL_PRO, STRATEGY_STRIP_ONLY)
-DEFAULT_STRATEGY = STRATEGY_TTV_AB
+# TTV-AB's fast bridge. `autoplay` is Twitch's Android autoplay tier - capped
+# around 360p, and consistently the quickest thing to come back clean, because
+# it is the least valuable inventory to stitch an ad into. Reaching for it
+# *first* means a break is covered in one probe instead of four, at the cost of
+# resolution for a few seconds. `BRIDGE_HOLD_SECONDS` is how long that bridge is
+# held before a full-quality candidate is looked for behind it (TTV-AB's
+# LQ_HQ_HOLD_MIN_MS).
+FAST_BRIDGE_TYPE = "autoplay"
+FAST_BRIDGE_QUALITY = "360p"
+BRIDGE_HOLD_SECONDS = 8.0
 
-
-def configured_strategy(value: str | None) -> str:
-    """Resolve the stored setting, tolerating the NULL an upgrade leaves."""
-    strategy = (value or "").strip()
-    return strategy if strategy in STRATEGIES else DEFAULT_STRATEGY
+# How many times one break may rotate off a bridge in search of full quality.
+# TTV-AB caps the equivalent at 2; past that the seams cost more than the
+# resolution buys.
+MAX_BRIDGE_UPGRADES = 2
 
 # Qualities to try when the stream's own quality yields nothing clean. 360p is
 # TTV-AB's floor: below that Twitch renditions get too degraded to be worth
@@ -84,6 +87,9 @@ class BackupCandidate:
     quality: str
     url: str
     playlist: str
+    # True when this was accepted at a lower quality than the session asked for.
+    # The session holds it as a bridge and probes for full quality behind it.
+    is_bridge: bool = False
 
 
 @dataclass
@@ -129,19 +135,44 @@ class BackupState:
         *,
         native_player_type: str | None,
         quality: str,
-        allow_low_quality: bool,
         now: float,
+        full_quality_only: bool = False,
     ) -> list[tuple[str, str]]:
-        """Order the rotation: every player type at the stream's own quality
-        before any quality is given up, which is what keeps a break costing
-        resolution only when it has to."""
+        """Order the rotation, fastest clean stream first.
+
+        The old ordering walked every player type at the session's own quality
+        before giving up any resolution, so a break could cost four sequential
+        streamlink spawns - one per poll - before anything covered it. Leading
+        with the `autoplay`/360p bridge covers the common break on the *first*
+        attempt; the session then upgrades behind it (see `MAX_BRIDGE_UPGRADES`).
+
+        `full_quality_only` is that upgrade probe: it wants the session's own
+        quality or nothing, because settling for another low rendition would
+        just buy a second seam for no picture.
+        """
         types = self.available_types(native_player_type, now)
         if not types:
             return []
-        qualities = [quality]
-        if allow_low_quality:
-            qualities += [q for q in FALLBACK_QUALITIES if q != quality]
-        return [(q, pt) for q in qualities for pt in types]
+
+        if full_quality_only:
+            return [(quality, pt) for pt in types if pt != FAST_BRIDGE_TYPE]
+
+        plan: list[tuple[str, str]] = []
+        if FAST_BRIDGE_TYPE in types:
+            plan.append((FAST_BRIDGE_QUALITY, FAST_BRIDGE_TYPE))
+        # Then the session's own quality everywhere else, so a break that a
+        # normal player type can cover cleanly is only ever briefly degraded.
+        plan += [(quality, pt) for pt in types if pt != FAST_BRIDGE_TYPE]
+        # Then give up resolution across the board.
+        for fallback in FALLBACK_QUALITIES:
+            if fallback == quality:
+                continue
+            plan += [
+                (fallback, pt)
+                for pt in types
+                if not (pt == FAST_BRIDGE_TYPE and fallback == FAST_BRIDGE_QUALITY)
+            ]
+        return plan
 
 
 def is_playable(playlist: str) -> bool:
@@ -181,7 +212,7 @@ async def find_backup(
     state: BackupState,
     fetch,
     user_token: str | None = None,
-    allow_low_quality: bool = True,
+    full_quality_only: bool = False,
 ) -> BackupCandidate | None:
     """Try **one** backup candidate. Call again next poll to try the next.
 
@@ -195,6 +226,9 @@ async def find_backup(
 
     Returns a candidate that is both playable and clean, or None to mean "not
     this time" - the caller simply asks again.
+
+    `full_quality_only` runs the upgrade probe behind an active bridge: same
+    search, but it will not accept another degraded rendition.
     """
     now = time.monotonic()
     if now < state.exhausted_until:
@@ -204,8 +238,8 @@ async def find_backup(
         state.plan = state.build_plan(
             native_player_type=native_player_type,
             quality=quality,
-            allow_low_quality=allow_low_quality,
             now=now,
+            full_quality_only=full_quality_only,
         )
         if not state.plan:
             state.exhausted_until = now + EXHAUSTED_COOLDOWN
@@ -223,6 +257,7 @@ async def find_backup(
             state=state,
             fetch=fetch,
             user_token=user_token,
+            session_quality=quality,
         )
     finally:
         state.last_attempt_seconds = round(time.monotonic() - started, 3)
@@ -257,6 +292,7 @@ async def _try_candidate(
     state: BackupState,
     fetch,
     user_token: str | None,
+    session_quality: str,
 ) -> BackupCandidate | None:
     """Resolve and validate one player type. None means "not this one"."""
     if state.cooldowns.get(player_type, 0.0) > time.monotonic():
@@ -309,4 +345,5 @@ async def _try_candidate(
         quality=quality,
         url=url,
         playlist=playlist,
+        is_bridge=quality != session_quality,
     )

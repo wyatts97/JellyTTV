@@ -27,13 +27,6 @@ services:
     volumes:
       - ${CONFIG_ROOT:-./data/config}:/config
       - ${MEDIA_ROOT:-./data/media}:/media/twitch
-    # Uncomment to use a hardware encoder for Settings -> "Re-encode to a
-    # continuous output". VAAPI and Quick Sync need the GPU's render node inside
-    # the container; without it they fail to start and JellyTTV falls back to
-    # serving the stream unencoded. Software encoding needs nothing here.
-    # NVENC uses the NVIDIA container runtime instead, not this.
-    # devices:
-    #   - /dev/dri:/dev/dri
     depends_on:
       redis:
         condition: service_healthy

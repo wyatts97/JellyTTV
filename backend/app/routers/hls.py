@@ -16,7 +16,6 @@ import asyncio
 import base64
 import binascii
 import hashlib
-import re
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -26,11 +25,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.config import get_config
 from app.db import get_db
 from app.logging_conf import get_logger
 from app.security import require_tuner_token
-from app.services import ad_events, adblock, hls, normaliser, resolver, stream_session
+from app.services import ad_events, adblock, hls, resolver, stream_session
 from app.services import channels as channel_service
 from app.services import http as shared_http
 from app.services.http import UPSTREAM_HEADERS
@@ -41,8 +39,10 @@ router = APIRouter(tags=["stream"], dependencies=[Depends(require_tuner_token)])
 
 PLAYLIST_MEDIA_TYPE = "application/vnd.apple.mpegurl"
 
-# Segment files the normaliser writes, and the only names that endpoint accepts.
-_SEGMENT_NAME = re.compile(r"seg\d{1,10}\.ts")
+# Our own black, silent, decodable second, served during a break no backup has
+# covered yet. Shipped as a file rather than generated, so nothing here needs
+# ffmpeg at runtime; see docs/development.md for how it is regenerated.
+HOLD_SEGMENT_PATH = Path(__file__).resolve().parent.parent / "assets" / "hold.ts"
 
 # Hard ceiling on how long a client may be kept waiting for a playlist. ffmpeg -
 # which is what the Jellyfin web client is really driving - abandons a live
@@ -140,20 +140,14 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
     """
     calls = {"n": 0}
 
-    async def resolve(prefer_direct: bool = False) -> str:
+    async def resolve() -> str:
         calls["n"] += 1
-        # `prefer_direct` is the session telling us an ad arrived over the route
-        # we last used, so mint the next token from the other side of the proxy.
-        proxy = None if prefer_direct else resolver.configured_proxy(
-            settings.row.twitch_proxy_url
-        )
         try:
             return await resolver.resolve_live(
                 login,
                 quality=quality,
                 user_token=settings.twitch_user_token,
                 player_type=settings.row.twitch_player_type,
-                proxy_url=proxy,
                 # Awaited inside the session lock, so a slow streamlink stalls
                 # every poll for this channel - far longer than
                 # PLAYLIST_DEADLINE_SECONDS suggests, because the deadline only
@@ -178,18 +172,20 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
 
 
 def _make_backup_finder(login: str, settings: ResolvedSettings):
-    """Build the backup search, or None when the strategy does not use one.
+    """Build the backup search, or None when ad handling is switched off.
 
-    Only the TTV-AB strategy substitutes a backup stream. Under `ttv_lol_pro`
-    the ad is meant to never exist (the token is minted through an ad-free
-    region), and under `strip_only` an ad that cannot be stripped is simply
-    played - so in both cases fetching another player type would be wasted work.
+    `strip_ads` is the single switch now. There used to be three selectable
+    strategies and only one of them substituted a backup stream; the other two
+    were an ad-free-region proxy (third-party infrastructure that could vanish
+    without notice) and a strip-only mode that simply played the ad. Both are
+    gone, so there is nothing left to branch on.
     """
-    strategy = adblock.configured_strategy(settings.row.ad_block_strategy)
-    if strategy != adblock.STRATEGY_TTV_AB or not settings.row.strip_ads:
+    if not settings.row.strip_ads:
         return None
 
-    async def find(state: adblock.BackupState, quality: str):
+    async def find(
+        state: adblock.BackupState, quality: str, full_quality_only: bool = False
+    ):
         return await adblock.find_backup(
             login=login,
             quality=quality,
@@ -199,139 +195,19 @@ def _make_backup_finder(login: str, settings: ResolvedSettings):
             state=state,
             fetch=_fetch_playlist,
             user_token=settings.twitch_user_token,
-            # Only ever allowed behind the normaliser. A backup at another
-            # resolution is a mid-playlist format change, signalled solely by a
-            # discontinuity tag that ffmpeg ignores - so the decoder keeps its
-            # old context and the picture freezes. The normaliser re-encodes
-            # every source to one fixed shape, which is what makes it safe.
-            allow_low_quality=(
-                settings.row.ad_backup_low_quality and _normalising(settings)
-            ),
+            full_quality_only=full_quality_only,
         )
 
     return find
 
 
-# Output geometry per Twitch quality string. The normaliser locks one shape for
-# the life of a session, so it has to be picked before anything is probed - and
-# picking it from configuration rather than from the first segment means a
-# backup that arrives at a different size is scaled into the same frame instead
-# of redefining it.
-_QUALITY_SHAPES = {
-    "1080p60": (1920, 1080, 60),
-    "1080p": (1920, 1080, 30),
-    "936p60": (1664, 936, 60),
-    "900p60": (1600, 900, 60),
-    "720p60": (1280, 720, 60),
-    "720p": (1280, 720, 30),
-    "480p": (854, 480, 30),
-    "360p": (640, 360, 30),
-    "160p": (284, 160, 30),
-}
-_DEFAULT_SHAPE = (1920, 1080, 60)
+def _make_hold_uri(base: str, login: str, key_suffix: str):
+    """Build the url of our own hold segment for a given sequence number."""
 
+    def hold(seq: int) -> str:
+        return f"{base}/hls/{quote(login)}/hold?seq={seq}{key_suffix}"
 
-def _output_shape(quality: str) -> tuple[int, int, int]:
-    """(width, height, fps) for a configured quality. "best" means full size."""
-    return _QUALITY_SHAPES.get((quality or "").strip().lower(), _DEFAULT_SHAPE)
-
-
-def _normalise_workdir(login: str, quality: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in f"{login}-{quality}")
-    return get_config().config_dir / "normalise" / safe
-
-
-async def _fetch_segment_bytes(url: str) -> bytes:
-    response = await shared_http.get_client().get(
-        url, headers=UPSTREAM_HEADERS, timeout=shared_http.SEGMENT_TIMEOUT
-    )
-    response.raise_for_status()
-    return response.content
-
-
-def _normalising(settings: ResolvedSettings) -> bool:
-    if not settings.row.normalise_output:
-        return False
-    if not normaliser.available():
-        # Logged rather than raised: a channel that plays the upstream directly
-        # beats a channel that does not play at all.
-        log.warning("normalise_output is on but ffmpeg is not on PATH; serving upstream")
-        return False
-    return True
-
-
-async def _serve_normalised(
-    *,
-    login: str,
-    quality: str,
-    settings: ResolvedSettings,
-    base: str,
-    key_suffix: str,
-) -> Response | None:
-    """Feed this poll into the encoder and serve its output instead.
-
-    Returns None when the encoder is not (yet) usable, which tells the caller to
-    serve the upstream playlist for now.
-
-    **Never waits for the encoder.** An encoder needs several seconds of input
-    before it has written a segment worth serving, and blocking the request over
-    that is the exact failure this whole change set exists to remove: ffmpeg on
-    the Jellyfin side abandons a live stream that answers slowly, so a request
-    held open for the warm-up reads to a viewer as a channel that never starts.
-    The upstream playlist is served meanwhile, and the switch happens on
-    whichever poll first finds output ready.
-    """
-    key = stream_session.session_key(login, quality)
-    norm = await normaliser.ensure(
-        key=key,
-        login=login,
-        workdir=_normalise_workdir(login, quality),
-        width=_output_shape(quality)[0],
-        height=_output_shape(quality)[1],
-        fps=_output_shape(quality)[2],
-        hwaccel=settings.row.normalise_hwaccel,
-        fetch_segment=_fetch_segment_bytes,
-    )
-    if norm is None:
-        return None
-
-    session = stream_session.get(login, quality)
-    if session is not None:
-        normaliser.submit(norm, [seg.uri for seg in session.window])
-
-    if not norm.ready():
-        return None
-
-    try:
-        playlist = norm.playlist_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    def to_ours(name: str) -> str:
-        return f"{base}/hls/{quote(login)}/nseg/{quote(name)}?q={quote(quality)}{key_suffix}"
-
-    lines = [
-        to_ours(line.strip()) if line.strip() and not line.startswith("#") else line
-        for line in playlist.splitlines()
-    ]
-    return Response(
-        "\n".join(lines) + "\n",
-        media_type=PLAYLIST_MEDIA_TYPE,
-        headers=NO_CACHE,
-    )
-
-
-def _uses_egress_flip(settings: ResolvedSettings) -> bool:
-    """Is re-resolving from the other egress this strategy's recovery move?
-
-    Only TTV LOL PRO's. It re-mints the token from a different region, which
-    also lands the session on a different `video-weaver` node - a seam in the
-    stream. That is a fair trade when the token is the only lever available, but
-    under TTV-AB the backup search already gets a clean token, so paying for a
-    seam every break bought nothing.
-    """
-    strategy = adblock.configured_strategy(settings.row.ad_block_strategy)
-    return strategy == adblock.STRATEGY_TTV_LOL_PRO
+    return hold
 
 
 def _make_ad_reporter(settings: ResolvedSettings):
@@ -388,7 +264,12 @@ async def master_playlist(
     # remember, rather than re-fetching to re-decide on every poll.
     existing = await stream_session.ensure(login, quality)
     if existing.is_master is not False:
-        upstream = await resolve()
+        # Its own resolver, not the session's. A resolver treats every call after
+        # its first as a recovery attempt and forces a fresh streamlink run, so
+        # sharing one here made the probe consume the cached resolve and the
+        # session's first poll re-run streamlink from scratch - seconds of work,
+        # inside the deadline, on every cold start.
+        upstream = await _make_resolver(login, quality, settings)()
         probe = await _fetch_text(upstream)
         # Recorded either way. Leaving it None on a master (which is what used
         # to happen - only `_session_playlist` ever wrote the flag, and only
@@ -434,15 +315,13 @@ async def _session_playlist(
                 strip_ads=settings.row.strip_ads,
                 resolve=resolve,
                 fetch=_fetch_playlist,
-                rewrite_uri=None
-                if _normalising(settings)
-                else _segment_rewriter(
+                rewrite_uri=_segment_rewriter(
                     base, login, key_suffix, settings.row.proxy_segments
                 ),
                 variant=variant,
                 backup=_make_backup_finder(login, settings),
                 report_ads=_make_ad_reporter(settings),
-                egress_flip=_uses_egress_flip(settings),
+                hold_uri=_make_hold_uri(base, login, key_suffix),
             ),
             timeout=PLAYLIST_DEADLINE_SECONDS,
         )
@@ -486,17 +365,6 @@ async def _session_playlist(
             backup=render.backup_player_type,
         )
 
-    if variant is None and _normalising(settings):
-        normalised = await _serve_normalised(
-            login=login,
-            quality=quality,
-            settings=settings,
-            base=base,
-            key_suffix=key_suffix,
-        )
-        if normalised is not None:
-            return normalised
-
     return Response(render.text, media_type=PLAYLIST_MEDIA_TYPE, headers=NO_CACHE)
 
 
@@ -516,9 +384,10 @@ async def media_playlist(
         pinned = decode_url(u)
         variant = hashlib.sha1(u.encode()).hexdigest()[:12]
 
-        async def resolve(prefer_direct: bool = False) -> str:
-            # A pinned variant has no token of its own to re-mint, so the
-            # polarity flip has nothing to act on here.
+        async def resolve() -> str:
+            # A pinned variant is a fixed url from a real master playlist; there
+            # is no token of our own to re-mint, so a re-resolve returns it
+            # unchanged and recovery is left to the session's retry loop.
             return pinned
     else:
         variant = None
@@ -580,34 +449,25 @@ async def segment(
     )
 
 
-@router.api_route("/hls/{login}/nseg/{name}", methods=["GET", "HEAD"], include_in_schema=False)
-async def normalised_segment(
-    login: str,
-    name: str,
-    session: Annotated[AsyncSession, Depends(get_db)],
-    q: Annotated[str | None, Query(description="Session quality")] = None,
-) -> Response:
-    """Serve one segment the encoder produced.
+@router.api_route("/hls/{login}/hold", methods=["GET", "HEAD"], include_in_schema=False)
+async def hold_segment(login: str, request: Request) -> Response:
+    """Serve the hold segment: one black, silent, decodable second of our own.
 
-    These are our own files, not Twitch's, so there is no upstream fetch here -
-    but the name still comes from the client, so it is matched against a strict
-    pattern rather than trusted. Without that, a crafted name would walk out of
-    the work directory and read anything the process can.
+    Handed out during an ad break that no clean backup has covered yet. It is a
+    static file, so unlike every other segment route there is no upstream fetch
+    and nothing client-supplied reaches the filesystem - the `seq` query
+    parameter exists only to make each hold's url unique, so the session's
+    already-served map cannot collapse a run of them into a playlist that stops
+    advancing.
     """
-    if not _SEGMENT_NAME.fullmatch(name):
-        raise HTTPException(status_code=400, detail="bad segment name")
+    if not HOLD_SEGMENT_PATH.is_file():  # pragma: no cover - packaging error
+        log.error("hold segment asset is missing", path=str(HOLD_SEGMENT_PATH))
+        raise HTTPException(status_code=500, detail="hold segment is unavailable")
 
-    settings = await get_settings(session)
-    quality = q or await _channel_quality(session, settings, login)
-    path = _normalise_workdir(login, quality) / name
-    if not path.is_file():
-        # The encoder deletes segments as they age out, so a late request is
-        # ordinary rather than exceptional.
-        raise HTTPException(status_code=404, detail="segment has aged out")
-
+    # A client pulling holds is alive even if a playlist poll runs late.
     stream_session.touch_any(login)
     return FileResponse(
-        path, media_type="video/mp2t", headers={"Cache-Control": "no-store"}
+        HOLD_SEGMENT_PATH, media_type="video/mp2t", headers={"Cache-Control": "no-store"}
     )
 
 

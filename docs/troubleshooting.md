@@ -110,20 +110,27 @@ Add `?refresh=1` to force a fresh streamlink resolve and start a new session.
 Specifically: a few stutters or freezes, then the picture returns with audio
 seconds behind — and the gap grows over a session rather than recovering.
 
-The delay is not arbitrary. **It is the amount of content removed from the
+The delay is not arbitrary. **It is the amount of content missing from the
 timeline.** ffmpeg's HLS demuxer does not implement `#EXT-X-DISCONTINUITY`
 ([ffmpeg trac #5419](https://trac.ffmpeg.org/ticket/5419)), and Jellyfin's web
 client cannot avoid that demuxer — a live HLS source is not in jellyfin-web's
 DirectPlayProfiles, so playback falls back to server-side ffmpeg even though
-hls.js would have handled the discontinuity. So any hole cut in the stream
-arrives as a raw timestamp jump, which video and audio absorb differently.
+hls.js would have handled the discontinuity. So any hole in the stream arrives
+as a raw timestamp jump, which video and audio absorb differently.
 
-JellyTTV therefore never cuts a hole. When an ad break cannot be covered by a
-clean backup stream, **the ad plays** — a continuous stream with an ad in it
-beats a stream that drifts apart permanently. That is deliberate, not a
-regression, and it is why you may see more ads than before.
+JellyTTV therefore never cuts a hole. A break is covered by a clean backup
+stream, and while none has been found the picture **holds on black** — our own
+silent, decodable second, repeated. Either way the timeline keeps advancing at
+real time with nothing missing from it, so there is no jump to absorb.
 
-If you still see drift:
+What that same demuxer still cannot absorb is a **format change**. A backup at a
+different resolution, and the hold segment itself, are both signalled only by a
+discontinuity tag it ignores, so the decoder keeps its old context and the
+picture can freeze at the seam until it recovers. That is the known cost of
+covering breaks without re-encoding, and the fix is to stop routing through that
+demuxer at all — see [jellyfin-plugin.md](jellyfin-plugin.md).
+
+If you see drift:
 
 - Confirm it from Jellyfin's side. Its transcode log (`/var/log/jellyfin/
   ffmpeg-transcode-*.log`, or Dashboard → Logs) shows the exact ffmpeg command
@@ -136,30 +143,35 @@ If you still see drift:
   is JellyTTV noticing upstream itself skipped time; it marks the seam, but
   ffmpeg will still ignore the marker. Frequent occurrences point at a flaky
   connection to Twitch rather than at ad handling.
-- If drift persists across all of that, enable **Settings → Re-encode to a
-  continuous output**. It runs a dedicated encoder per channel and discards
-  upstream timestamps entirely, which makes the problem impossible by
-  construction — at the cost of roughly 1.5–3 CPU cores per 1080p60 channel in
-  software. Pick a hardware encoder if your host has one.
+- **Compare against a native client.** Android, iOS, Kodi and most TV clients
+  direct-play HLS through a player that honours discontinuities. If the stream
+  is smooth there and only the web client drifts, the cause is the demuxer above
+  and not the ad handling.
 
-## The stream freezes during ad breaks with re-encoding on
+## The picture goes black during ad breaks
 
-Expected when nothing can cover the break. Re-encoding fixes *timing*, not
-missing content: while an ad plays on our token, Twitch is not sending the
-broadcaster's video at all, so there is nothing to encode. What you get is a
-clean freeze and an in-sync resume, rather than a desync.
+That is the hold, and it means no clean backup was found — not that ad blocking
+failed. Coverage comes from the backup search, which asks Twitch for the same
+channel on a different `playerType`; ads are stitched per token, so another
+token is usually still carrying the live video. When every player type is in the
+same break there is nothing to switch to, and the hold is what plays.
 
-Coverage comes from the backup search, not the encoder. `stats.backup_polls` in
-`GET /api/debug/hls/sessions` is how often a break was actually covered — if it
-stays at zero, the encoder is costing you CPU for nothing and should go back
-off. A Turbo subscription or a per-channel sub is the only thing that removes
-ads upstream and so avoids the question entirely.
+`GET /api/debug/hls/sessions` separates the two cases:
+
+- `stats.backup_polls` climbing → breaks are being covered. A short black gap at
+  the start of a break, while the search runs, is normal.
+- `stats.hold_segments` climbing for the whole break, with `backup_exhausted`
+  true → nothing clean exists for this channel right now.
+- `serving_bridge` true → the break is covered, but by a lower-quality
+  rendition. `bridge_upgrades` counts how often that was traded up.
+
+A Turbo subscription or a per-channel sub is the only thing that removes ads
+upstream and so avoids the question entirely.
 
 ## Ads still play
 
-- Ad stripping only works with **Settings → Proxy playlists through JellyTTV** enabled.
-- A break that no clean backup could cover plays the ad on purpose. See
-  "Audio drifts out of sync with video" for why cutting it is worse.
+- Ad blocking only works with **Settings → Proxy playlists through JellyTTV**
+  and **Block ads** both enabled.
 - Twitch changes its ad-stitching format periodically. Set `JELLYTTV_LOG_LEVEL=DEBUG` and look for
   `stripped twitch ad segments`. If the count is always 0 during an ad break, the detection heuristic
   needs updating — it lives in one small file, `backend/app/services/hls.py`, with tests in

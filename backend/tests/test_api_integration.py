@@ -329,65 +329,80 @@ async def test_settings_player_type_round_trip(client: httpx.AsyncClient):
     assert (await client.get("/api/settings")).json()["twitch_player_type"] == "embed"
 
 
-async def test_ad_block_strategy_defaults_to_backup_stream(client: httpx.AsyncClient):
-    """Backup substitution is the default; the others stay selectable."""
-    await _complete_setup(client)
+async def test_ad_avoidance_is_on_by_default_behind_one_switch(
+    client: httpx.AsyncClient,
+):
+    """`strip_ads` is the whole control surface now.
 
-    body = (await client.get("/api/settings")).json()
-    assert body["ad_block_strategy"] == "ttv_ab"
-    # Off by default: a backup at another resolution is a mid-playlist format
-    # change, and nothing downstream can absorb one unless the normaliser is
-    # running. See the note on the model field.
-    assert body["ad_backup_low_quality"] is False
-    assert body["normalise_output"] is False
-    assert body["normalise_hwaccel"] == "none"
-    assert body["ad_spoofing"] is True
-
-    switched = await client.put("/api/settings", json={"ad_block_strategy": "ttv_lol_pro"})
-    assert switched.status_code == 200, switched.text
-    assert switched.json()["ad_block_strategy"] == "ttv_lol_pro"
-    assert (await client.get("/api/settings")).json()["ad_block_strategy"] == "ttv_lol_pro"
-
-
-async def test_an_unknown_ad_block_strategy_is_rejected(client: httpx.AsyncClient):
-    """A typo must not silently disable ad blocking."""
-    await _complete_setup(client)
-    bad = await client.put("/api/settings", json={"ad_block_strategy": "nope"})
-    assert bad.status_code == 422
-
-
-async def test_ad_proxy_defaults_on_and_can_be_switched_off(client: httpx.AsyncClient):
-    """Unset means default-on; explicitly empty is the off switch."""
-    await _complete_setup(client)
-
-    body = (await client.get("/api/settings")).json()
-    assert body["twitch_proxy_url"].startswith("http://")
-    assert body["twitch_proxy_active"] is True
-
-    off = await client.put("/api/settings", json={"twitch_proxy_url": ""})
-    assert off.status_code == 200, off.text
-    assert off.json()["twitch_proxy_url"] == ""
-    assert off.json()["twitch_proxy_active"] is False
-    # Persisted, not just echoed - an empty string must survive the writer's
-    # None-filter, or "off" would silently revert to the default on restart.
-    assert (await client.get("/api/settings")).json()["twitch_proxy_url"] == ""
-
-
-async def test_setting_a_user_token_disables_the_proxy(client: httpx.AsyncClient):
-    """A credential must never be routed through a third-party proxy.
-
-    Reported as inactive rather than silently ignored, so the UI can explain
-    why the configured proxy is doing nothing.
+    There used to be three selectable strategies plus a proxy url. Two of the
+    three are gone - an ad-free-region proxy that depended on third-party
+    infrastructure, and a strip-only mode that just played the ad - so there is
+    nothing left to choose between and no way to land on a combination that
+    quietly does nothing.
     """
     await _complete_setup(client)
 
-    updated = await client.put("/api/settings", json={"twitch_user_token": "oauth-secret"})
-    assert updated.status_code == 200, updated.text
-    body = updated.json()
+    body = (await client.get("/api/settings")).json()
+    assert body["strip_ads"] is True
+    assert body["proxy_enabled"] is True, "ad handling needs the playlist proxy"
+    assert body["ad_spoofing"] is True
 
-    assert body["twitch_user_token_set"] is True
-    assert body["twitch_proxy_active"] is False, "the proxy must stand down for a token"
-    assert "oauth-secret" not in str(body), "the token was echoed back"
+    # The removed settings must be gone from the contract, not merely ignored -
+    # a stale key the UI still renders is how a dead control survives a deletion.
+    for gone in (
+        "ad_block_strategy",
+        "ad_backup_low_quality",
+        "twitch_proxy_url",
+        "twitch_proxy_active",
+        "normalise_output",
+        "normalise_hwaccel",
+    ):
+        assert gone not in body, f"{gone} is still exposed"
+
+
+async def test_removed_ad_settings_are_ignored_not_honoured(client: httpx.AsyncClient):
+    """An old client PUTting the deleted keys must not resurrect them.
+
+    `SettingsUpdate` is `extra="ignore"`, so these are dropped rather than
+    rejected - which is the right call for a settings page that may be a version
+    behind, as long as nothing they name comes back.
+    """
+    await _complete_setup(client)
+
+    stale = await client.put(
+        "/api/settings",
+        json={"ad_block_strategy": "ttv_lol_pro", "normalise_output": True},
+    )
+    assert stale.status_code == 200, stale.text
+    assert "ad_block_strategy" not in stale.json()
+    assert "normalise_output" not in stale.json()
+
+
+async def test_the_hold_segment_is_served_and_the_encoder_route_is_gone(
+    client: httpx.AsyncClient,
+):
+    """The hold is what an ad break plays instead of the ad.
+
+    It is a static asset rather than something generated on demand, so the only
+    ways it can fail are the packaging ones: the file missing from the image, or
+    the route not being wired up. Both are worth a test, because the failure
+    mode downstream is a break that serves an unfetchable segment.
+    """
+    settings = await _complete_setup(client)
+    token = settings["tuner_token"]
+
+    held = await client.get(f"/hls/anychannel/hold?seq=1&key={token}")
+    assert held.status_code == 200, held.text
+    assert held.headers["content-type"].startswith("video/")
+    assert len(held.content) > 1000, "the hold segment is empty"
+
+    # Serving it must not depend on the channel being tracked: a break is
+    # already in progress by the time this is fetched.
+    assert (await client.get(f"/hls/other/hold?seq=99&key={token}")).status_code == 200
+
+    # The re-encoder is gone, and so is the route that served its output.
+    gone = await client.get(f"/hls/anychannel/nseg/seg1.ts?key={token}")
+    assert gone.status_code == 404
 
 
 async def test_settings_recovers_from_null_columns_left_by_an_upgrade(

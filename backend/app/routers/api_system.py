@@ -16,7 +16,7 @@ from app.security import AdminUser
 from app.services import channels as channel_service
 from app.services import events as event_bus
 from app.services import eventsub as eventsub_service
-from app.services import images, library, normaliser, resolver, stream_session, vods
+from app.services import images, library, resolver, stream_session, vods
 from app.services.settings_store import get_settings
 from app.util import iso_z, utcnow
 
@@ -244,7 +244,6 @@ async def diagnostics(
             "min_free_disk_gib": cfg.min_free_disk_gib,
         },
         "stream_sessions": stream_session.stats(),
-        "normalisers": normaliser.stats(),
         # What each channel's artwork actually resolves to, plus any recent
         # fetch failure. Blank avatars used to be silent; this makes them
         # explainable without turning on debug logging.
