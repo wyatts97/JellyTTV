@@ -21,7 +21,9 @@ channels** (with a real EPG), and past broadcasts as **episodes** of a per-chann
   starts streaming, delivered through the
   [Streamyfin companion plugin](https://github.com/streamyfin/jellyfin-plugin-streamyfin) using the
   Jellyfin API key you already configured. (Jellyfin's own web app cannot receive push notifications
-  — its service worker only does offline caching — so a client that supports them is required.)
+  — its service worker only does offline caching — so a client that supports them is required.) The
+  plugin is third-party and must itself be built for Jellyfin 12.0; until it is, JellyTTV treats it
+  as simply not installed and everything else keeps working.
 - **One-command install** — Docker Compose, a setup wizard, and a React dashboard for everything.
 
 > **Use responsibly.** JellyTTV is for personal use with content you are entitled to access. You
@@ -49,6 +51,7 @@ You will need:
 
 | Requirement | Where to get it |
 |---|---|
+| Jellyfin **12.0 or newer** | [jellyfin.org/downloads](https://jellyfin.org/downloads) — 10.11 and earlier are not supported |
 | Twitch Client ID + Secret | [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) — client type **Confidential** |
 | Jellyfin API key (optional) | Jellyfin → Dashboard → API Keys |
 | Public HTTPS URL (optional) | Only for EventSub webhooks; see [reverse proxy](docs/reverse-proxy.md) |

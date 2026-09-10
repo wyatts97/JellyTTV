@@ -1,7 +1,13 @@
 """Jellyfin server client.
 
+Targets Jellyfin 12.0 and later.
+
 Auth uses an API key created in Jellyfin's Dashboard -> API Keys, passed as
-`Authorization: MediaBrowser Token=<key>`.
+`Authorization: MediaBrowser Token=<key>`. Jellyfin 12.0 disabled its legacy
+authorization mechanisms by default - the `X-Emby-Authorization`, `X-Emby-Token`
+and `X-MediaBrowser-Token` headers, the `Emby` scheme and the `api_key` query
+parameter - but the `MediaBrowser` scheme below is the supported one and is not
+gated behind that switch.
 
 Endpoints used:
   GET  /System/Info            - connectivity + version check
@@ -9,11 +15,8 @@ Endpoints used:
   POST /Library/Refresh        - full library scan (requires elevation)
   POST /Items/{id}/Refresh     - targeted refresh, preferred when we know the id
   GET  /Items?...              - locate our series items by name
-  GET  /ScheduledTasks         - resolve the "Refresh Guide" task's id
-  POST /ScheduledTasks/Running/{taskId} - trigger the Live TV guide refresh
   GET  /System/Configuration/livetv     - read the XMLTV listings providers
-  POST /LiveTv/ListingProviders         - (re)create a listings provider
-  DELETE /LiveTv/ListingProviders       - remove one
+  POST /LiveTv/ListingProviders         - save one, which refreshes the guide
 """
 
 from __future__ import annotations
@@ -58,7 +61,6 @@ class JellyfinClient:
         self._timeout = timeout
         self._external = client
         self._client = client
-        self._refresh_guide_task_id: str | None = None
 
     async def __aenter__(self) -> JellyfinClient:
         if self._client is None:
@@ -150,6 +152,9 @@ class JellyfinClient:
         log.info("triggered targeted jellyfin refresh", item_id=item_id)
 
     async def find_series(self, name: str, *, parent_id: str | None = None) -> str | None:
+        # `recursive` is load-bearing, not decorative: Jellyfin 12.0 made /Items
+        # honour it when `includeItemTypes` is set, where earlier versions forced
+        # it. Dropping it would search only the immediate children of `parentId`.
         params: dict[str, Any] = {
             "searchTerm": name,
             "includeItemTypes": "Series",
@@ -165,45 +170,6 @@ class JellyfinClient:
         items = payload.get("Items") or []
         return items[0].get("Id") if items else None
 
-    async def _resolve_refresh_guide_task_id(self) -> str:
-        """Look up the 'Refresh Guide' scheduled task's id.
-
-        Jellyfin's `/ScheduledTasks/Running/{taskId}` requires the task's actual
-        GUID, not its stable `Key` ("RefreshGuide") - there is no name-based
-        route. The id is stable per Jellyfin install, so callers should cache it.
-        """
-        tasks = await self._request("GET", "/ScheduledTasks") or []
-        for task in tasks:
-            if task.get("Key") == "RefreshGuide":
-                task_id = task.get("Id")
-                if task_id:
-                    return task_id
-        raise JellyfinError("could not find the 'Refresh Guide' scheduled task")
-
-    async def refresh_guide(self) -> None:
-        """Trigger Jellyfin's 'Refresh Guide' scheduled task.
-
-        This forces Jellyfin to re-fetch the XMLTV file and update the Live TV
-        guide data, so channel live/offline state and programme metadata is
-        current without waiting for the default 24h interval.
-        """
-        if self._refresh_guide_task_id is None:
-            self._refresh_guide_task_id = await self._resolve_refresh_guide_task_id()
-
-        try:
-            await self._request(
-                "POST", f"/ScheduledTasks/Running/{self._refresh_guide_task_id}"
-            )
-        except JellyfinError as exc:
-            if exc.status != 404:
-                raise
-            # The id may have changed (e.g. across a Jellyfin upgrade); re-resolve once.
-            self._refresh_guide_task_id = await self._resolve_refresh_guide_task_id()
-            await self._request(
-                "POST", f"/ScheduledTasks/Running/{self._refresh_guide_task_id}"
-            )
-        log.info("triggered jellyfin guide refresh")
-
     async def _listing_providers(self) -> list[dict[str, Any]]:
         config = await self._request("GET", "/System/Configuration/livetv") or {}
         return list(config.get("ListingProviders") or [])
@@ -217,27 +183,26 @@ class JellyfinClient:
         path = str(provider.get("Path") or provider.get("Url") or "")
         return path.split("?", 1)[0] == guide_url.split("?", 1)[0]
 
-    async def force_guide_refresh(self, guide_url: str) -> bool:
+    async def refresh_guide_now(self, guide_url: str) -> bool:
         """Make Jellyfin genuinely re-download the guide, not re-read its cache.
 
-        `XmlTvListingsProvider` caches the downloaded XMLTV at
+        `XmlTvListingsProvider` still caches the downloaded XMLTV at
         `<cache>/xmltv/<ListingsProviderInfo.Id>.xml` and reuses it for
-        `_maxCacheAge` - one hour - regardless of what cache headers we send.
-        Running the "Refresh Guide" task inside that hour therefore re-parses the
-        *stale* file, which is why a channel going live or ending could take up
-        to an hour to show up, at an arbitrary phase.
+        `_maxCacheAge` - one hour - regardless of what cache headers we send. So
+        running the "Refresh Guide" task on its own re-parses the *stale* file,
+        which is why a channel going live or ending could take up to an hour to
+        show up, at an arbitrary phase.
 
-        `SaveListingProvider` mints a fresh `Guid.NewGuid()` whenever the posted
-        Id is blank, and then queues the guide refresh itself. A new id means a
-        new cache filename, so the download cannot be served from cache.
+        Jellyfin 12.0's `SaveListingProvider` does both halves of the fix for us:
+        it calls `InvalidateListingsProviderCache`, which deletes that cache file,
+        and then queues the guide refresh itself. Re-posting the provider exactly
+        as we found it - `Id` included, so it is replaced in place rather than
+        added - is therefore the whole operation. No provider is created or
+        destroyed, so `EnabledTuners` and `ChannelMappings` are untouched and the
+        channels keep their Jellyfin ids.
 
-        The new provider is added *before* the old one is deleted: a failure
-        halfway then leaves Live TV with a working provider rather than none.
-        Re-posting the whole object preserves `EnabledTuners` and
-        `ChannelMappings`.
-
-        Returns False when no matching provider was found, so the caller can
-        fall back to the ordinary refresh.
+        Returns False when no matching provider was found, which means the XMLTV
+        provider was never added and there is no guide to refresh.
         """
         providers = await self._listing_providers()
         existing = next(
@@ -246,33 +211,18 @@ class JellyfinClient:
         if existing is None:
             log.warning(
                 "no xmltv listings provider matches our guide url; "
-                "cannot bypass Jellyfin's guide cache",
+                "add it in Jellyfin under Live TV -> TV Guide Data Providers",
                 guide_url=guide_url.split("?", 1)[0],
             )
             return False
 
-        old_id = str(existing.get("Id") or "")
-        replacement = {**existing, "Id": ""}
         await self._request(
             "POST",
             "/LiveTv/ListingProviders",
             params={"validateListings": "false", "validateLogin": "false"},
-            json_body=replacement,
+            json_body=existing,
         )
-        if old_id:
-            try:
-                await self._request(
-                    "DELETE", "/LiveTv/ListingProviders", params={"id": old_id}
-                )
-            except JellyfinError as exc:
-                # The refresh is already queued against the new provider, so the
-                # guide is correct; we have merely left a duplicate behind.
-                log.warning(
-                    "could not remove the previous listings provider",
-                    provider_id=old_id,
-                    error=str(exc),
-                )
-        log.info("recreated the xmltv listings provider to bypass Jellyfin's guide cache")
+        log.info("saved the xmltv listings provider to force a fresh guide download")
         return True
 
     async def send_notification(

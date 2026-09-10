@@ -130,9 +130,16 @@ def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> N
     # A live broadcast has no known end time, so it gets a rolling block that
     # each guide refresh extends. Nothing follows it: a placeholder after the
     # block would become "on now" the moment the block ran out.
+    #
+    # Both ends are snapped to the hour. Jellyfin 12.0 skips re-importing a
+    # programme whose ETag is unchanged, and that ETag covers the programme's
+    # start and end times - so a window computed from an unrounded `now` would
+    # differ on every refresh and the skip could never fire. Neither end is a
+    # real time anyway: the start is already pulled back so the block covers
+    # "on now", and the end is a guess at when the stream might stop.
     live_start = channel.live_started_at or now
-    live_start = min(live_start, now - timedelta(hours=1))
-    live_end = min(window_end, now + timedelta(hours=4))
+    live_start = min(live_start, _floor_hour(now - timedelta(hours=1)))
+    live_end = min(window_end, _ceil_hour(now + timedelta(hours=4)))
     _programme(
         root,
         channel,
@@ -146,12 +153,25 @@ def _append_programmes(root: ET.Element, channel: Channel, now, window_end) -> N
     )
 
 
+def _floor_hour(value):
+    return value.replace(minute=0, second=0, microsecond=0)
+
+
+def _ceil_hour(value):
+    floored = _floor_hour(value)
+    return floored if floored == value else floored + timedelta(hours=1)
+
+
 def _live_description(channel: Channel) -> str:
+    # No viewer count. It is the most volatile thing we know about a stream
+    # and the guide is the worst place to put it: Jellyfin caches the
+    # downloaded XMLTV for up to an hour, so any figure here is routinely an
+    # hour stale, and a precise wrong number reads worse than no number. It
+    # also changed on every generation, which alone was enough to defeat
+    # 12.0's unchanged-programme ETag check. The dashboard has the live one.
     parts = [channel.live_title or ""]
     if channel.live_game:
         parts.append(f"Category: {channel.live_game}")
-    if channel.live_viewers is not None:
-        parts.append(f"{channel.live_viewers:,} viewers")
     parts.append(f"https://www.twitch.tv/{channel.twitch_login}")
     return "\n".join(p for p in parts if p)
 

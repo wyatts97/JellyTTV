@@ -4,6 +4,13 @@ Two things stood between a channel going live and the guide saying so, and
 neither was visible from this side: arq's dedupe suppressed the reactive job for
 an hour, and Jellyfin caches the downloaded XMLTV on disk for an hour regardless
 of cache headers. These pin both fixes.
+
+The second one is Jellyfin-version-sensitive. `XmlTvListingsProvider` caches at
+`<cache>/xmltv/<provider id>.xml` for an hour, so triggering the "Refresh Guide"
+task inside that hour just re-parses the stale copy. Jellyfin 12.0's
+`SaveListingProvider` deletes that file and queues the refresh itself, so saving
+the provider *as it stands* is now the whole operation - where 10.11 needed the
+provider recreated under a new id to change the cache key.
 """
 
 from __future__ import annotations
@@ -45,15 +52,16 @@ def test_a_coalesced_job_id_dedupes_a_burst_but_not_the_hour():
 
 # -------------------------------------------------------- cache-busting refresh
 @respx.mock
-async def test_forcing_a_refresh_recreates_the_provider_to_change_its_cache_key():
-    """Jellyfin keys its one-hour guide cache on the provider id.
+async def test_saving_the_provider_unchanged_is_what_busts_the_cache():
+    """Jellyfin 12.0 clears the guide cache when the provider is saved.
 
-    So the only way to make it genuinely re-download from outside the Jellyfin
-    host is to give it a provider with a different id. Posting a blank Id makes
-    Jellyfin mint a fresh GUID and queue the refresh itself.
+    The provider must go back with its own `Id`, so `SaveListingProvider` takes
+    the replace-in-place branch. A blank id would have Jellyfin mint a new
+    provider and orphan the old one - which is what 10.11 required, and is now
+    both unnecessary and destructive.
     """
     provider = {
-        "Id": "old-provider-id",
+        "Id": "provider-id",
         "Type": "xmltv",
         "Path": f"{GUIDE}?key=stale-token",
         "EnableAllTuners": True,
@@ -63,91 +71,75 @@ async def test_forcing_a_refresh_recreates_the_provider_to_change_its_cache_key(
         return_value=httpx.Response(200, json=livetv_config([provider]))
     )
     posted = respx.post(f"{BASE}/LiveTv/ListingProviders").mock(
-        return_value=httpx.Response(200, json={"Id": "new-provider-id"})
+        return_value=httpx.Response(200, json={"Id": "provider-id"})
     )
     deleted = respx.delete(f"{BASE}/LiveTv/ListingProviders").mock(
         return_value=httpx.Response(204)
     )
 
     async with JellyfinClient(BASE, "key") as client:
-        assert await client.force_guide_refresh(GUIDE) is True
+        assert await client.refresh_guide_now(GUIDE) is True
 
+    assert posted.call_count == 1
     body = json.loads(posted.calls[0].request.read())
-    assert body["Id"] == "", "a blank id is what makes Jellyfin mint a new one"
-    # Everything else must survive, or the recreate costs the user their setup.
+    assert body["Id"] == "provider-id", "the id must survive, or the provider is replaced"
+    # Everything else must survive too, or the save costs the user their setup.
     assert body["ChannelMappings"] == [{"Name": "twitch.adapt"}]
     assert body["EnableAllTuners"] is True
     assert body["Path"] == provider["Path"]
 
-    assert deleted.called
-    assert deleted.calls[0].request.url.params["id"] == "old-provider-id"
+    params = posted.calls[0].request.url.params
+    assert params["validateListings"] == "false"
+    assert params["validateLogin"] == "false"
+
+    assert not deleted.called, "nothing is destroyed any more"
 
 
 @respx.mock
-async def test_the_new_provider_is_added_before_the_old_one_is_removed():
-    """A failure halfway must leave Live TV with a provider, not none."""
-    order: list[str] = []
-    provider = {"Id": "old", "Type": "xmltv", "Path": GUIDE}
+async def test_the_refresh_never_touches_the_scheduled_tasks_api():
+    """Saving the provider queues the refresh, so there is no task to trigger.
 
+    `/ScheduledTasks/Running/{guid}` needed the task's GUID looked up by `Key`,
+    which was a whole round-trip to work around there being no name-based route.
+    """
+    provider = {"Id": "p", "Type": "xmltv", "Path": GUIDE}
     respx.get(f"{BASE}/System/Configuration/livetv").mock(
         return_value=httpx.Response(200, json=livetv_config([provider]))
     )
-
-    def on_post(request):
-        order.append("post")
-        return httpx.Response(200, json={})
-
-    def on_delete(request):
-        order.append("delete")
-        return httpx.Response(204)
-
-    respx.post(f"{BASE}/LiveTv/ListingProviders").mock(side_effect=on_post)
-    respx.delete(f"{BASE}/LiveTv/ListingProviders").mock(side_effect=on_delete)
+    respx.post(f"{BASE}/LiveTv/ListingProviders").mock(return_value=httpx.Response(200, json={}))
+    tasks = respx.get(f"{BASE}/ScheduledTasks").mock(return_value=httpx.Response(200, json=[]))
 
     async with JellyfinClient(BASE, "key") as client:
-        await client.force_guide_refresh(GUIDE)
+        assert await client.refresh_guide_now(GUIDE) is True
 
-    assert order == ["post", "delete"]
+    assert not tasks.called
+    assert not hasattr(JellyfinClient, "refresh_guide")
 
 
 @respx.mock
 async def test_a_stale_token_in_the_stored_path_still_matches():
     """The stored Path carries the tuner token, which may have been rotated."""
-    provider = {"Id": "old", "Type": "xmltv", "Path": f"{GUIDE}?key=rotated-away"}
+    provider = {"Id": "p", "Type": "xmltv", "Path": f"{GUIDE}?key=rotated-away"}
     respx.get(f"{BASE}/System/Configuration/livetv").mock(
         return_value=httpx.Response(200, json=livetv_config([provider]))
     )
     respx.post(f"{BASE}/LiveTv/ListingProviders").mock(return_value=httpx.Response(200, json={}))
-    respx.delete(f"{BASE}/LiveTv/ListingProviders").mock(return_value=httpx.Response(204))
 
     async with JellyfinClient(BASE, "key") as client:
-        assert await client.force_guide_refresh(f"{GUIDE}?key=current-token") is True
+        assert await client.refresh_guide_now(f"{GUIDE}?key=current-token") is True
 
 
 @respx.mock
-async def test_no_matching_provider_reports_failure_so_the_caller_falls_back():
+async def test_no_matching_provider_reports_failure_rather_than_guessing():
+    """No provider of ours means no XMLTV guide is configured at all."""
     other = {"Id": "x", "Type": "xmltv", "Path": "http://elsewhere/guide.xml"}
     respx.get(f"{BASE}/System/Configuration/livetv").mock(
         return_value=httpx.Response(200, json=livetv_config([other]))
     )
-    creating = respx.post(f"{BASE}/LiveTv/ListingProviders").mock(
+    saving = respx.post(f"{BASE}/LiveTv/ListingProviders").mock(
         return_value=httpx.Response(200, json={})
     )
 
     async with JellyfinClient(BASE, "key") as client:
-        assert await client.force_guide_refresh(GUIDE) is False
-    assert not creating.called, "must not touch a provider that is not ours"
-
-
-@respx.mock
-async def test_a_failed_delete_still_counts_as_refreshed():
-    """The refresh is already queued against the new provider by then."""
-    provider = {"Id": "old", "Type": "xmltv", "Path": GUIDE}
-    respx.get(f"{BASE}/System/Configuration/livetv").mock(
-        return_value=httpx.Response(200, json=livetv_config([provider]))
-    )
-    respx.post(f"{BASE}/LiveTv/ListingProviders").mock(return_value=httpx.Response(200, json={}))
-    respx.delete(f"{BASE}/LiveTv/ListingProviders").mock(return_value=httpx.Response(500))
-
-    async with JellyfinClient(BASE, "key") as client:
-        assert await client.force_guide_refresh(GUIDE) is True
+        assert await client.refresh_guide_now(GUIDE) is False
+    assert not saving.called, "must not touch a provider that is not ours"

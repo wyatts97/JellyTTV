@@ -86,7 +86,12 @@ services:
   #   docker compose --profile with-jellyfin up -d
   # ---------------------------------------------------------------------------
   jellyfin:
-    image: jellyfin/jellyfin:latest
+    # Pinned, not `latest`: JellyTTV targets the Jellyfin 12.x API, and a major
+    # bump is a one-way trip - 12.0's migrations rewrite the database and cannot
+    # be rolled back without restoring a backup. Upgrading also requires a full
+    # library scan afterwards, because those migrations drop alternate versions
+    # that were auto-resolved rather than manually merged.
+    image: jellyfin/jellyfin:12.0
     container_name: jellyttv-jellyfin
     restart: unless-stopped
     profiles: ["with-jellyfin"]

@@ -356,6 +356,9 @@ async def test_ad_avoidance_is_on_by_default_behind_one_switch(
         "twitch_proxy_active",
         "normalise_output",
         "normalise_hwaccel",
+        # Jellyfin 12.0 clears the guide cache whenever the listings provider is
+        # saved, so bypassing that cache is no longer an expensive opt-in trick.
+        "jellyfin_force_guide_refresh",
     ):
         assert gone not in body, f"{gone} is still exposed"
 
@@ -371,11 +374,16 @@ async def test_removed_ad_settings_are_ignored_not_honoured(client: httpx.AsyncC
 
     stale = await client.put(
         "/api/settings",
-        json={"ad_block_strategy": "ttv_lol_pro", "normalise_output": True},
+        json={
+            "ad_block_strategy": "ttv_lol_pro",
+            "normalise_output": True,
+            "jellyfin_force_guide_refresh": False,
+        },
     )
     assert stale.status_code == 200, stale.text
     assert "ad_block_strategy" not in stale.json()
     assert "normalise_output" not in stale.json()
+    assert "jellyfin_force_guide_refresh" not in stale.json()
 
 
 async def test_the_hold_segment_is_served_and_the_encoder_route_is_gone(

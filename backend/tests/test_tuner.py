@@ -85,7 +85,13 @@ def test_xmltv_channel_ids_match_the_playlist():
         assert f'tvg-id="{channel_id}"' in playlist
 
 
-def test_xmltv_live_programme_carries_title_game_and_viewers():
+def test_xmltv_live_programme_carries_title_and_game_but_no_viewer_count():
+    """The viewer count is deliberately absent.
+
+    Jellyfin caches the downloaded guide for up to an hour, so a count here
+    would routinely be an hour stale - and it changed on every generation,
+    which defeated 12.0's skip-unchanged-programmes ETag check on its own.
+    """
     guide = build_xmltv([_channel("alpha", live=True)], window_hours=12)
     root = ET.fromstring(guide.split("\n", 2)[2])
 
@@ -95,7 +101,8 @@ def test_xmltv_live_programme_carries_title_game_and_viewers():
     assert first.get("channel") == "twitch.alpha"
     assert first.findtext("title") == "alpha is playing something"
     assert "Just Chatting" in (first.findtext("desc") or "")
-    assert "4,321 viewers" in (first.findtext("desc") or "")
+    assert "4,321" not in (first.findtext("desc") or "")
+    assert "viewers" not in (first.findtext("desc") or "")
     assert first.find("live") is not None
     # Thumbnail placeholders must be expanded.
     icon = first.find("icon")
@@ -133,3 +140,40 @@ def test_xmltv_timestamps_use_the_expected_format():
     assert start is not None
     assert start.endswith(" +0000")
     assert len(start.split(" ")[0]) == 14
+
+
+def test_a_live_programme_is_byte_stable_across_refreshes_within_the_hour():
+    """Jellyfin 12.0 skips re-importing a programme whose ETag is unchanged.
+
+    That ETag covers the title, description, images and - the easy one to get
+    wrong - the start and stop times. A window derived straight from `now` moved
+    on every single generation, so the skip could never fire and every refresh
+    rewrote every programme. Snapping both ends to the hour is what fixes it.
+
+    This asserts the property rather than the rounding: two guides built moments
+    apart, from an unchanged channel, must produce identical `<programme>` XML.
+    """
+    channel = _channel("alpha", live=True)
+
+    first = ET.fromstring(build_xmltv([channel]).split("\n", 2)[2])
+    second = ET.fromstring(build_xmltv([channel]).split("\n", 2)[2])
+
+    def programmes(root):
+        return [ET.tostring(p, encoding="unicode") for p in root.findall("programme")]
+
+    assert programmes(first), "expected a programme for a live channel"
+    assert programmes(first) == programmes(second)
+
+
+def test_the_live_block_still_covers_now_after_snapping():
+    """Snapping must not push the block off "on now", which is its whole job."""
+    now = utcnow()
+    channel = _channel("alpha", live=True)
+    root = ET.fromstring(build_xmltv([channel]).split("\n", 2)[2])
+
+    programme = root.findall("programme")[0]
+    start = programme.get("start", "").split(" ")[0]
+    stop = programme.get("stop", "").split(" ")[0]
+    stamp = now.strftime("%Y%m%d%H%M%S")
+
+    assert start < stamp < stop, f"{start} !< {stamp} !< {stop}"

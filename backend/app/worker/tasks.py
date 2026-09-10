@@ -41,23 +41,28 @@ log = get_logger(__name__)
 
 _download_semaphore: asyncio.Semaphore | None = None
 
-# Bypassing Jellyfin's guide cache costs a listings-provider recreate, and each
-# one orphans the previous `<guid>.xml` in Jellyfin's cache directory (Jellyfin
-# never cleans those up). So it is rate-limited: reactive refreshes still land
-# within a few minutes of a channel changing state, without churning provider
-# ids every time a poll notices something.
+# Jellyfin queues its guide refresh with `CancelIfRunningAndQueue`, so asking for
+# one while an import is still running cancels that import and starts over. Under
+# a burst of EventSub deliveries that would keep the guide perpetually mid-refresh
+# and never finish one, so refreshes are spaced out. A request that arrives inside
+# the window is deferred rather than dropped: the state change that prompted it
+# still has to reach the guide.
 FORCED_GUIDE_REFRESH_MIN_INTERVAL = 180.0
 _last_forced_guide_refresh = float("-inf")
 
 
-def _claim_forced_guide_refresh() -> bool:
-    """Take the rate-limit budget for a provider recreate, if it is available."""
+def _claim_forced_guide_refresh() -> float:
+    """Take the rate-limit budget for a guide refresh.
+
+    Returns 0.0 when the budget was claimed, otherwise the seconds still to wait.
+    """
     global _last_forced_guide_refresh
     now = time.monotonic()
-    if now - _last_forced_guide_refresh < FORCED_GUIDE_REFRESH_MIN_INTERVAL:
-        return False
+    elapsed = now - _last_forced_guide_refresh
+    if elapsed < FORCED_GUIDE_REFRESH_MIN_INTERVAL:
+        return FORCED_GUIDE_REFRESH_MIN_INTERVAL - elapsed
     _last_forced_guide_refresh = now
-    return True
+    return 0.0
 
 
 def _semaphore() -> asyncio.Semaphore:
@@ -453,13 +458,11 @@ async def jellyfin_refresh(ctx: dict[str, Any]) -> dict[str, Any]:
 async def jellyfin_refresh_guide(ctx: dict[str, Any]) -> dict[str, Any]:
     """Make Jellyfin's Live TV guide reflect current live/offline state.
 
-    Triggering Jellyfin's "Refresh Guide" task is on its own not enough:
-    Jellyfin caches the downloaded XMLTV on disk for an hour, keyed by the
-    listings provider's id, so a refresh inside that hour re-parses the stale
-    copy no matter what cache headers we send. `force_guide_refresh` recreates
-    the provider to change that key, which is the only way to get a genuinely
-    fresh guide from outside the Jellyfin host. It is rate-limited and falls
-    back to the plain task trigger.
+    Triggering Jellyfin's "Refresh Guide" task is on its own not enough: Jellyfin
+    caches the downloaded XMLTV on disk for an hour, keyed by the listings
+    provider's id, so a refresh inside that hour re-parses the stale copy no
+    matter what cache headers we send. Saving the provider is what clears that
+    cache and queues the refresh - see `JellyfinClient.refresh_guide_now`.
     """
     async with job_record("jellyfin_refresh_guide") as job:
         async with session_scope() as session:
@@ -469,28 +472,34 @@ async def jellyfin_refresh_guide(ctx: dict[str, Any]) -> dict[str, Any]:
                 return {"skipped": True}
             base = settings.row.jellyfin_url or ""
             key = settings.jellyfin_api_key or ""
-            want_force = settings.row.jellyfin_force_guide_refresh
             guide_url = f"{settings.self_base_url}/tuner/guide.xml"
 
-        forced = False
+        wait = _claim_forced_guide_refresh()
+        if wait > 0:
+            # Defer rather than drop, so the state change that prompted this
+            # still reaches the guide. Coalesced so a burst of deliveries
+            # collapses onto one retry instead of queueing a dozen.
+            retry_in = int(wait) + 1
+            await enqueue(
+                "jellyfin_refresh_guide",
+                job_id=coalesced_job_id("jellyfin_refresh_guide:retry"),
+                defer_seconds=retry_in,
+            )
+            job.message = f"deferred {retry_in}s, refreshed too recently"
+            return {"deferred": retry_in}
+
         try:
             async with JellyfinClient(base, key) as client:
-                if want_force and _claim_forced_guide_refresh():
-                    forced = await client.force_guide_refresh(guide_url)
-                if not forced:
-                    # Still worth doing: it is what picks up a change once the
-                    # cached copy has aged out on its own.
-                    await client.refresh_guide()
+                refreshed = await client.refresh_guide_now(guide_url)
         except JellyfinError as exc:
             job.message = str(exc)
             raise
-        job.message = (
-            "guide refresh triggered (cache bypassed)"
-            if forced
-            else "guide refresh triggered"
-        )
-    await event_bus.publish("jellyfin.guide_refreshed", {"forced": forced})
-    return {"ok": True, "forced": forced}
+        if not refreshed:
+            job.message = "no XMLTV guide provider is configured in Jellyfin"
+            return {"skipped": True}
+        job.message = "guide refresh triggered"
+    await event_bus.publish("jellyfin.guide_refreshed", {})
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------- maintenance

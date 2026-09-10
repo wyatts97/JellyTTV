@@ -54,9 +54,13 @@ being geo/IP-blocked by Twitch.
 Almost always an ad difference between the two channels, not a client difference.
 A Twitch user OAuth token only yields an ad-free playlist for channels the account
 is **subscribed** to (or everywhere, with Turbo); every other channel still gets
-ads stitched in. Streamyfin plays the HLS URL natively and keeps retrying a
-playlist, while the web UI is driven by ffmpeg on the Jellyfin server, which gives
-up quickly — so a channel that hiccups during an ad break fails there first.
+ads stitched in.
+
+On Jellyfin 10.11 this also had a client-side component: Streamyfin played the HLS
+URL natively and kept retrying a playlist, while the web UI was driven by ffmpeg
+on the server, which gives up quickly. **On 12.0 both clients go through that same
+server-side ffmpeg**, so the two should now fail and succeed together. If they
+still differ on 12.0, the cause is the ad difference above, not the client.
 
 Confirm it by comparing a working and a failing channel while both are live:
 
@@ -112,11 +116,16 @@ seconds behind — and the gap grows over a session rather than recovering.
 
 The delay is not arbitrary. **It is the amount of content missing from the
 timeline.** ffmpeg's HLS demuxer does not implement `#EXT-X-DISCONTINUITY`
-([ffmpeg trac #5419](https://trac.ffmpeg.org/ticket/5419)), and Jellyfin's web
-client cannot avoid that demuxer — a live HLS source is not in jellyfin-web's
-DirectPlayProfiles, so playback falls back to server-side ffmpeg even though
-hls.js would have handled the discontinuity. So any hole in the stream arrives
-as a raw timestamp jump, which video and audio absorb differently.
+([ffmpeg trac #5419](https://trac.ffmpeg.org/ticket/5419)), and on Jellyfin 12.0
+no client can avoid that demuxer: `M3UTunerHost` refuses direct play for any
+channel URL ending `.m3u8`, and `StreamBuilder` refuses it again for anything
+probing as `hls`/`applehttp`/`dash`. Every client is remuxed server-side, so any
+hole in the stream arrives as a raw timestamp jump, which video and audio absorb
+differently.
+
+On 10.11 this was a web-client-only problem and native clients played the URL
+directly. If you are comparing against older notes or an older server, that is
+what changed.
 
 JellyTTV therefore never cuts a hole. A break is covered by a clean backup
 stream, and while none has been found the picture **holds on black** — our own
@@ -127,8 +136,13 @@ What that same demuxer still cannot absorb is a **format change**. A backup at a
 different resolution, and the hold segment itself, are both signalled only by a
 discontinuity tag it ignores, so the decoder keeps its old context and the
 picture can freeze at the seam until it recovers. That is the known cost of
-covering breaks without re-encoding, and the fix is to stop routing through that
-demuxer at all — see [jellyfin-plugin.md](jellyfin-plugin.md).
+covering breaks without re-encoding, and the only real fix is to stop routing
+through that demuxer at all — which 12.0 made considerably harder. See
+[jellyfin-plugin.md](jellyfin-plugin.md).
+
+Jellyfin 12.0 also ships FFmpeg 8.1, and the path is now a remux rather than a
+full transcode, so the severity of this seam may differ from what is described
+here. If you are seeing it, the log check below is what settles it.
 
 If you see drift:
 
@@ -188,21 +202,27 @@ Jellyfin's own "Refresh Guide" task inside that hour just re-parses the stale
 copy. That, on its own, is a guide that is up to an hour behind at an arbitrary
 phase.
 
-JellyTTV works around it by recreating the XMLTV listings provider, which changes
-the id and therefore the cache filename — see `JellyfinClient.force_guide_refresh`.
-It is controlled by **Force guide updates through Jellyfin's cache** in Settings
-(on by default) and rate-limited to once every few minutes, because each recreate
-leaves the previous `<guid>.xml` behind in Jellyfin's cache directory.
+JellyTTV gets past it by **saving the XMLTV listings provider**, unchanged and
+under its own id. Jellyfin 12.0's `SaveListingProvider` deletes that provider's
+cached `.xml` and queues the guide refresh itself, so one request does both
+halves — see `JellyfinClient.refresh_guide_now`. Nothing is created or deleted,
+so channel mappings, enabled tuners and channel ids all survive.
+
+It is rate-limited to once every few minutes. Jellyfin queues the refresh with
+`CancelIfRunningAndQueue`, so asking again while an import is still running
+cancels that import and starts over; under a burst of go-live events the guide
+would otherwise never finish refreshing. A request that arrives inside the window
+is deferred, not dropped.
 
 If the guide still looks stale:
 
-- Check `GET /api/jobs` for `jellyfin_refresh_guide`. `guide refresh triggered
-  (cache bypassed)` is the forced path; plain `guide refresh triggered` means it
-  fell back — usually because no listings provider matches `self_base_url` +
-  `/tuner/guide.xml`. Make sure **Base URL for Jellyfin** matches the URL you
-  actually entered as the XMLTV provider in Jellyfin.
+- Check `GET /api/jobs` for `jellyfin_refresh_guide`. `no XMLTV guide provider is
+  configured in Jellyfin` means no listings provider matches `self_base_url` +
+  `/tuner/guide.xml` — make sure **Base URL for Jellyfin** matches the URL you
+  actually entered as the XMLTV provider in Jellyfin. `deferred Ns, refreshed too
+  recently` is the rate limit doing its job and will land shortly.
 - `could not reach Jellyfin` / `rejected the API key` means the API key is not an
-  admin key; recreating a listings provider requires elevation.
+  admin key; saving a listings provider requires elevation.
 - Offline channels deliberately have **no programmes at all**, so Jellyfin's
   "On Now" cannot show them; they still appear under Channels. A blank guide row
   for a channel that is not streaming is working as intended. If you do see

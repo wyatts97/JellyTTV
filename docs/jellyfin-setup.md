@@ -4,6 +4,12 @@ Three things to configure. The third one is the one people get wrong.
 
 Grab the exact URLs (including the tuner key) from **JellyTTV → Settings → Add to Jellyfin**.
 
+> **Jellyfin 12.0 or newer is required.** JellyTTV relies on 12.0 clearing the guide cache when a
+> listings provider is saved, which is what keeps live/offline state current. It also authenticates
+> with the `Authorization: MediaBrowser` scheme — the one 12.0 kept when it disabled its legacy
+> mechanisms by default. Upgrading an existing server from 10.11 is a one-way trip: back up the data
+> directory first, and run a full library scan afterwards.
+
 ---
 
 ## 1. Live TV tuner
@@ -36,11 +42,17 @@ Jellyfin allows only **one** guide provider at a time (XMLTV *or* Schedules Dire
 channel mapping is automatic. If Jellyfin still shows unmapped channels, open the `…` menu next to
 the provider and choose **Map Channels**.
 
-Then run **Dashboard → Scheduled Tasks → Refresh Guide**.
+Then run **Dashboard → Scheduled Tasks → Refresh Guide** once. After that JellyTTV keeps the guide
+current on its own, including past Jellyfin's one-hour guide cache — see
+[troubleshooting.md](troubleshooting.md).
 
-Offline channels stay in the playlist by design, showing an `Offline` programme. Jellyfin keys
-channels by id, so adding and removing them churns its database and loses user favourites. You can
-change this in **JellyTTV → Settings → Keep offline channels in the tuner**.
+Live programmes carry an XMLTV `<live/>` tag, which Jellyfin 12.0 reads into `IsLive` and surfaces as
+a **LIVE** badge in the guide. Earlier versions ignored it.
+
+Offline channels stay in the playlist by design, with a `<channel>` entry but no programmes, so they
+never appear in *On Now*. Jellyfin keys channels by id, so adding and removing them churns its
+database and loses user favourites. You can change this in **JellyTTV → Settings → Keep offline
+channels in the tuner**.
 
 ## 3. The Shows library — read this one
 
