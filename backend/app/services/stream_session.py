@@ -646,6 +646,7 @@ async def _apply_backup(
     backup: BackupFinder,
     *,
     ad_pod: bool,
+    ad_incoming: bool,
     fetch: Fetcher,
     rewrite_uri: UriRewriter | None,
     now: float,
@@ -665,6 +666,9 @@ async def _apply_backup(
 
     Returning False during a break does *not* mean the ad gets served: the
     caller holds instead. See `get_playlist`.
+
+    `ad_pod` alone decides what is served. `ad_incoming` only decides when to
+    start *looking*, which is a separate question - see the prefetch below.
     """
     if not ad_pod:
         # Native is clean. Wait for it to stay that way before switching back:
@@ -687,6 +691,21 @@ async def _apply_backup(
             session.backup.clear()
             session.bridge_upgrades = 0
             session.pending_discontinuity = True
+        elif ad_incoming and session.backup.active is None:
+            # Not in a break yet, but one is arriving - the newest segment is
+            # already an ad, with real content still behind it. Start the search
+            # now so a candidate is ready to promote on the poll that needs one,
+            # instead of that poll starting the search and holding a black
+            # second while it runs. This is CoolCmd's trigger: his player starts
+            # its ad-free playlist when the *last* segment is an ad, not when the
+            # whole window is.
+            #
+            # Guarded on `backup_task is None`, not just on nothing being in
+            # flight: a search that has finished sits in `backup_task` until
+            # `_take_backup_result` collects it, and starting another here would
+            # overwrite that handle and throw the candidate away.
+            if session.backup_task is None:
+                _start_backup_search(session, backup)
         return False
 
     session.clean_native_polls = 0
@@ -1003,6 +1022,10 @@ async def get_playlist(
         ad_pod = bool(
             strip_ads and parsed.segments and all(s.is_ad for s in parsed.segments)
         )
+        # Weaker, and earlier: a break appending at the live edge, with real
+        # content still behind it. Selects nothing - it only tells the backup
+        # search to start before the break has swallowed the whole window.
+        ad_incoming = bool(strip_ads and parsed.ends_in_ad)
         # The ad-only run is counted here, not in `_advance`, because it is a
         # property of the *native* stream: passing a pod through commits ad
         # segments as ordinary content, and a backup splice commits somebody
@@ -1020,6 +1043,7 @@ async def get_playlist(
                 session,
                 backup,
                 ad_pod=ad_pod,
+                ad_incoming=ad_incoming,
                 fetch=fetch,
                 rewrite_uri=rewrite_uri,
                 now=now,

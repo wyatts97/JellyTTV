@@ -45,6 +45,40 @@ seg101.ts
 seg102.ts
 """
 
+MEDIA_NO_SEGMENTS = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+"""
+
+MEDIA_ALL_AD = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:106
+#EXT-X-DATERANGE:ID="stitched-ad-1700000000",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z",DURATION=16.0,X-TV-TWITCH-AD-ROLL-TYPE="MIDROLL"
+#EXTINF:2.000,
+ad4.ts
+#EXTINF:2.000,
+ad5.ts
+#EXTINF:2.000,
+ad6.ts
+"""
+
+MEDIA_AD_AT_THE_LIVE_EDGE = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:2.000,
+seg100.ts
+#EXTINF:2.000,
+seg101.ts
+#EXT-X-DATERANGE:ID="stitched-ad-1700000000",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z",DURATION=16.0,X-TV-TWITCH-AD-ROLL-TYPE="MIDROLL"
+#EXTINF:2.000,
+ad0.ts
+#EXTINF:2.000,
+ad1.ts
+"""
+
 MEDIA_AD_ENDED_BY_DISCONTINUITY = """#EXTM3U
 #EXT-X-VERSION:3
 #EXTINF:2.000,
@@ -344,6 +378,44 @@ def test_parse_marks_ads_rather_than_dropping_them():
     assert len(parsed.segments) == 6
     assert parsed.ad_segment_count == 3
     assert [s.ad_source for s in parsed.segments if s.is_ad] == ["daterange"] * 3
+
+
+def test_a_pod_still_appending_is_seen_at_the_live_edge():
+    """The earliest signal a break has started, and what prefetches a backup.
+
+    Deliberately weaker than "every segment is an ad": here there is still real
+    content in the window, so nothing is substituted yet - but the pod is
+    growing at the live edge, which is the moment to go looking for a clean copy
+    of the stream rather than after the break has swallowed the whole window.
+    """
+    parsed = parse_media_playlist(MEDIA_AD_AT_THE_LIVE_EDGE, BASE)
+
+    assert parsed.ends_in_ad
+    assert parsed.ad_segment_count == 2
+    assert not all(s.is_ad for s in parsed.segments), (
+        "this window still carries content, so it must not read as a full pod"
+    )
+
+
+def test_a_pod_in_the_middle_of_the_window_is_not_the_live_edge():
+    """Content behind the pod means the break may equally be over already."""
+    parsed = parse_media_playlist(MEDIA_WITH_STITCHED_ADS, BASE)
+
+    assert parsed.ad_segment_count == 3
+    assert not parsed.ends_in_ad
+
+
+def test_a_clean_window_and_an_empty_one_never_read_as_a_break():
+    assert not parse_media_playlist(CLEAN_MEDIA, BASE).ends_in_ad
+    assert not parse_media_playlist(MEDIA_NO_SEGMENTS, BASE).ends_in_ad
+
+
+def test_a_window_that_is_nothing_but_ad_also_ends_in_one():
+    """`ends_in_ad` is a superset of the full-pod case, not an alternative."""
+    parsed = parse_media_playlist(MEDIA_ALL_AD, BASE)
+
+    assert parsed.ends_in_ad
+    assert all(s.is_ad for s in parsed.segments)
 
 
 def test_master_playlist_detection_and_variant_rewriting():

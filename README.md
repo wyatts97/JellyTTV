@@ -206,6 +206,16 @@ channel requested for a different player type is usually not in the same break; 
 during a break is what keeps the picture moving instead of stopping. Used under its MIT-based
 licence with attribution, and reimplemented from observed behaviour — no source was copied.
 
+Three further refinements come from
+**[Alternate Player for Twitch.tv](https://addons.mozilla.org/firefox/addon/twitch_5/)** by
+Alexander Choporov (CoolCmd), BSD-3-Clause: the `picture-by-picture` player type, which is the one
+that extension still mints its ad-free playlist with and which now leads the backup rotation
+(`backend/app/services/adblock.py`); starting the backup search when a pod first appears at the
+live edge rather than once it fills the window, so the break is covered a poll sooner
+(`backend/app/services/stream_session.py`); and the shape of the replayed ad telemetry
+(`backend/app/services/ad_events.py`). Reimplemented from observed behaviour — no source was
+copied.
+
 ## Licence
 
 MIT

@@ -90,15 +90,25 @@ def build_packets(attrs: dict[str, str], pod_length: int) -> list[dict[str, Any]
     payload = {
         "stitched": True,
         "ad_id": ad_id,
-        "roll_type": attrs.get("X-TV-TWITCH-AD-ROLL-TYPE", ""),
+        "roll_type": attrs.get("X-TV-TWITCH-AD-ROLL-TYPE", "").lower(),
         "creative_id": attrs.get("X-TV-TWITCH-AD-CREATIVE-ID", ""),
         "order_id": attrs.get("X-TV-TWITCH-AD-ORDER-ID", ""),
         "line_item_id": attrs.get("X-TV-TWITCH-AD-LINE-ITEM-ID", ""),
-        "player_mute": False,
-        "player_volume": 1.0,
+        # A muted but on-screen player. This is what CoolCmd's Alternate Player
+        # reports, and it is the more plausible of the two claims available to
+        # us: something that went through a tuner and a transcoder did not have
+        # a viewer sitting at full volume. The previous `False`/`1.0` asserted
+        # exactly that.
+        "player_mute": True,
+        "player_volume": 0.5,
         "visible": True,
-        "duration": duration,
-        "ad_position": position,
+        # Whole seconds. Twitch's own player reports a rounded duration, and a
+        # float carrying the playlist's `DURATION` to six places is a tell.
+        "duration": round(duration),
+        # `X-TV-TWITCH-AD-POD-POSITION` counts from zero; the event field counts
+        # from one, so the first ad of a pod reported a position no real player
+        # ever sends.
+        "ad_position": position + 1,
         "total_ads": pod_length,
     }
 
@@ -119,12 +129,21 @@ def build_packets(attrs: dict[str, str], pod_length: int) -> list[dict[str, Any]
 
     batch = [packet("video_ad_impression")]
     batch += [packet("video_ad_quartile_complete", quartile=q) for q in _QUARTILES]
-    batch.append(packet("video_ad_pod_complete"))
+    # The pod-complete event carries two fields the others do not, and omitting
+    # them left the one event that closes out the break the least convincing of
+    # the six.
+    batch.append(
+        packet(
+            "video_ad_pod_complete",
+            ad_session_id=attrs.get("X-TV-TWITCH-AD-AD-SESSION-ID", ""),
+            format_name=attrs.get("X-TV-TWITCH-AD-AD-FORMAT", ""),
+        )
+    )
     return batch
 
 
 async def report_blocked_ads(
-    playlist: str, *, user_token: str | None = None, device_id: str = "oauth"
+    playlist: str, *, user_token: str | None = None, device_id: str | None = None
 ) -> int:
     """Report every not-yet-reported stitched ad in this playlist.
 
@@ -160,9 +179,15 @@ async def report_blocked_ads(
 
     headers = {
         "Client-ID": CLIENT_ID,
-        "X-Device-Id": device_id,
         "Content-Type": "text/plain; charset=UTF-8",
     }
+    # The install's device id - the same one the playlist was resolved with (see
+    # services.resolver). This used to send the literal `"oauth"` while resolves
+    # sent a different string entirely, so the viewer who was served the ad and
+    # the viewer who reported watching it were two different devices. Sent only
+    # when we have one: no header beats a wrong one.
+    if device_id:
+        headers["X-Device-Id"] = device_id
     if user_token:
         headers["Authorization"] = f"OAuth {user_token}"
 

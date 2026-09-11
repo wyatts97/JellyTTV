@@ -52,7 +52,20 @@ LIVE_RESOLVE_TIMEOUT = 15.0
 # picture quality for a benefit that is not there.
 PLAYER_TYPE_NONE = "web"
 DEFAULT_PLAYER_TYPE = PLAYER_TYPE_NONE
-PLAYER_TYPES = (PLAYER_TYPE_NONE, "frontpage", "thunderdome", "embed", "autoplay")
+PLAYER_TYPES = (
+    PLAYER_TYPE_NONE,
+    "frontpage",
+    "thunderdome",
+    "embed",
+    "autoplay",
+    # Twitch's squeezeback preview tier, and the only player type CoolCmd's
+    # Alternate Player for Twitch.tv mints its ad-free playlist with. Offered
+    # here for the native stream too, but not made the default: preview-tier
+    # renditions are exactly the quality trade the comment above warns about.
+    # `adblock` reaches for it first when covering a break, where a few seconds
+    # of reduced quality is the better deal.
+    "picture-by-picture",
+)
 
 
 def resolve_player_type(value: str | None) -> str:
@@ -144,6 +157,7 @@ def _streamlink_cmd(
     quality: str,
     user_token: str | None,
     player_type: str | None = None,
+    device_id: str | None = None,
 ) -> list[str]:
     # No `--twitch-low-latency` here: it only changes streamlink's own buffering
     # and prefetch behaviour during playback, and `--stream-url` makes streamlink
@@ -152,12 +166,21 @@ def _streamlink_cmd(
         STREAMLINK_BIN,
         "--stream-url",
         "--quiet",
-        # Ad-solution headers that make Twitch serve fewer stitched ads.
-        "--http-header",
-        "X-Device-Id=twitch-web-wall-mason",
-        "--http-header",
-        "Device-ID=twitch-web-wall-mason",
     ]
+    # This install's device id, on both header spellings Twitch accepts. It used
+    # to be the literal `twitch-web-wall-mason`, which every ad-block script
+    # publishes and every JellyTTV install therefore shared - a single string
+    # Twitch could match on, describing thousands of viewers as one. A stable
+    # per-install id is the opposite trade: it says "one returning viewer", and
+    # it says the same thing to the ad-event report (services.ad_events), which
+    # has to agree with this or the two describe different people.
+    if device_id:
+        cmd += [
+            "--http-header",
+            f"X-Device-Id={device_id}",
+            "--http-header",
+            f"Device-ID={device_id}",
+        ]
     resolved_player_type = resolve_player_type(player_type)
     if resolved_player_type != PLAYER_TYPE_NONE:
         # Undocumented Twitch behaviour, hence configurable rather than
@@ -194,12 +217,13 @@ async def _resolve(
     user_token: str | None,
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    device_id: str | None = None,
 ) -> str:
     errors: list[str] = []
 
     if shutil.which(STREAMLINK_BIN):
         code, out, err = await _run(
-            _streamlink_cmd(url, quality, user_token, player_type),
+            _streamlink_cmd(url, quality, user_token, player_type, device_id),
             timeout=timeout,
         )
         if code == 0 and out.startswith("http"):
@@ -235,6 +259,7 @@ async def _resolve_cached(
     force: bool = False,
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    device_id: str | None = None,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
@@ -246,7 +271,9 @@ async def _resolve_cached(
         now = time.time()
         if entry and entry.expires_at > now and not force:
             return entry.url
-        resolved = await _resolve(url, quality, user_token, player_type, timeout)
+        resolved = await _resolve(
+            url, quality, user_token, player_type, timeout, device_id
+        )
         _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
         return resolved
 
@@ -280,6 +307,7 @@ async def resolve_live(
     force: bool = False,
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
+    device_id: str | None = None,
 ) -> str:
     """Return the upstream media-playlist url for a live channel.
 
@@ -299,6 +327,7 @@ async def resolve_live(
         force=force,
         player_type=player_type,
         timeout=timeout,
+        device_id=device_id,
     )
 
 
@@ -308,6 +337,7 @@ async def resolve_vod(
     quality: str = "best",
     user_token: str | None = None,
     player_type: str | None = None,
+    device_id: str | None = None,
 ) -> str:
     """Return a playable url for a Twitch VOD. Cached longer than live."""
     key = f"vod:{video_id}:{quality}:{resolve_player_type(player_type)}"
@@ -318,4 +348,5 @@ async def resolve_vod(
         user_token,
         300.0,
         player_type=player_type,
+        device_id=device_id,
     )

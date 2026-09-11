@@ -86,6 +86,19 @@ def random_eventsub_secret() -> str:
     return secrets.token_urlsafe(32)[:64]
 
 
+def random_device_id() -> str:
+    """A device id shaped like the one Twitch's own web client sends.
+
+    32 lower-case alphanumerics, generated once per install and then kept. The
+    shape matters less than the two properties: it is stable, so this install
+    looks like one returning viewer rather than a new one every resolve, and it
+    is unique, so it is not the shared literal that ad-block scripts have
+    published and Twitch can therefore match on.
+    """
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(32))
+
+
 def reset_cipher_cache() -> None:
     """Test helper."""
     global _fernet

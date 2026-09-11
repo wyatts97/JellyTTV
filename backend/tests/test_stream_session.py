@@ -487,6 +487,68 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
     assert_playlist_continuity([r.text for r in renders])
 
 
+async def test_the_backup_search_starts_at_the_live_edge_not_at_a_full_pod():
+    """Cover the break on its first ad-only poll, not its second.
+
+    The search used to be triggered only once *every* segment in the window was
+    an ad, which is a whole window after the break actually began. Because the
+    search is detached, that poll could only hold a black second and pick the
+    result up on the next one. Starting it while there is still content in the
+    window - the pod growing at the live edge - means the candidate is already
+    resolved when the first ad-only poll needs it.
+    """
+    native = [
+        build_playlist(start_seq=100, count=4),
+        # Mixed: 102-103 are content, 104-105 are the start of the pod. Nothing
+        # is substituted here - but the search starts.
+        build_playlist(start_seq=102, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        # Now the pod fills the window, and the prefetched candidate covers it.
+        build_playlist(start_seq=106, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=110, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
+        build_playlist(start_seq=114, count=4),
+    ]
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False):
+        searches["n"] += 1
+        return stream_session.BackupCandidate(
+            player_type="picture-by-picture",
+            quality=quality,
+            url="https://video-weaver.b.hls.ttvnw.net/backup.m3u8",
+            playlist=build_backup_playlist(start_seq=200),
+        )
+
+    renders, _ = await poll_all(native, backup=find_backup)
+
+    # The mixed poll serves the native stream with the ads stripped out of it,
+    # and promotes nothing: `ad_pod` still decides what is played.
+    assert renders[1].backup_player_type is None
+    assert searches["n"] >= 1, "the live-edge pod should have started a search"
+
+    # ...and the first ad-only poll is already covered, with no hold segment.
+    assert renders[2].backup_player_type == "picture-by-picture"
+    assert HOLD_URI_PREFIX not in renders[2].text, (
+        "a prefetched candidate should mean the break never needs holding"
+    )
+    assert renders[2].segment_count > 0, "the break produced no media"
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_a_clean_stream_never_starts_a_backup_search():
+    """The earlier trigger must not turn ordinary content into streamlink spawns."""
+    native = [build_playlist(start_seq=100 + 4 * i, count=4) for i in range(5)]
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False):
+        searches["n"] += 1
+        return None
+
+    renders, _ = await poll_all(native, backup=find_backup)
+
+    assert searches["n"] == 0
+    assert all(r.backup_player_type is None for r in renders)
+
+
 async def test_native_resumes_only_after_several_clean_polls():
     """One clean poll is routinely the gap between two pods of one break."""
     native = [

@@ -148,6 +148,7 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
                 quality=quality,
                 user_token=settings.twitch_user_token,
                 player_type=settings.row.twitch_player_type,
+                device_id=settings.twitch_device_id,
                 # Awaited inside the session lock, so a slow streamlink stalls
                 # every poll for this channel - far longer than
                 # PLAYLIST_DEADLINE_SECONDS suggests, because the deadline only
@@ -195,6 +196,7 @@ def _make_backup_finder(login: str, settings: ResolvedSettings):
             state=state,
             fetch=_fetch_playlist,
             user_token=settings.twitch_user_token,
+            device_id=settings.twitch_device_id,
             full_quality_only=full_quality_only,
         )
 
@@ -217,7 +219,12 @@ def _make_ad_reporter(settings: ResolvedSettings):
 
     async def report(playlist: str) -> int:
         return await ad_events.report_blocked_ads(
-            playlist, user_token=settings.twitch_user_token
+            playlist,
+            user_token=settings.twitch_user_token,
+            # Must be the id the playlist was resolved with. Reporting an
+            # impression from a different device than the one that was served
+            # the ad is a contradiction Twitch does not have to work hard to see.
+            device_id=settings.twitch_device_id,
         )
 
     return report
@@ -484,6 +491,7 @@ async def vod_stream(
             quality=settings.row.default_quality,
             user_token=settings.twitch_user_token,
             player_type=settings.row.twitch_player_type,
+            device_id=settings.twitch_device_id,
         )
     except resolver.ResolveError as exc:
         log.warning("vod resolve failed", video_id=video_id, error=str(exc))

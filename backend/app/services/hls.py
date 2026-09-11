@@ -226,6 +226,20 @@ class ParsedPlaylist:
     def ad_segment_count(self) -> int:
         return sum(1 for s in self.segments if s.is_ad)
 
+    @property
+    def ends_in_ad(self) -> bool:
+        """Is the newest segment in this window an ad?
+
+        The earliest reliable sign that a break has *started*: the pod is still
+        being appended at the live edge. A pod sitting fully inside the window
+        says nothing either way - the break behind it may already be over.
+
+        Deliberately weaker than "every segment is an ad", which is what selects
+        the playback source. This only says a break is beginning, which is
+        enough to go looking for a backup before one is needed.
+        """
+        return bool(self.segments) and self.segments[-1].is_ad
+
 
 @dataclass(slots=True)
 class OutputSegment:

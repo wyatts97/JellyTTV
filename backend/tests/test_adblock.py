@@ -102,21 +102,42 @@ def test_the_rotation_leads_with_the_fast_bridge():
 
     The old ordering walked every player type at the session's own quality before
     giving up any resolution, so a break could cost four sequential streamlink
-    spawns - one per poll - before anything covered it. `autoplay` at 360p is the
-    quickest thing to come back clean, so it goes first and the break is covered
-    on the first attempt; the session then trades up behind it.
+    spawns - one per poll - before anything covered it. The bridge type at 360p
+    is the quickest thing to come back clean, so it goes first and the break is
+    covered on the first attempt; the session then trades up behind it.
     """
     state = adblock.BackupState()
     plan = state.build_plan(native_player_type="site", quality="1080p60", now=0.0)
 
     assert plan[0] == (adblock.FAST_BRIDGE_QUALITY, adblock.FAST_BRIDGE_TYPE)
     # Then the session's own quality on every other type, before anything
-    # degrades: three entries here, since `site` is native and `autoplay` is
-    # already spent on the bridge.
-    others = [pt for pt in adblock.BACKUP_PLAYER_TYPES if pt not in ("site", "autoplay")]
+    # degrades - `site` is native and the bridge type is already spent.
+    others = [
+        pt
+        for pt in adblock.BACKUP_PLAYER_TYPES
+        if pt not in ("site", adblock.FAST_BRIDGE_TYPE)
+    ]
     assert plan[1 : 1 + len(others)] == [("1080p60", pt) for pt in others]
     assert all(pt != "site" for _, pt in plan), "the native type must not be tried"
     assert len(plan) == len(set(plan)), "a pair must not be probed twice"
+
+
+def test_the_bridge_type_is_never_asked_for_a_quality_it_cannot_serve():
+    """`picture-by-picture` caps at 360p, so the ladder must skip it.
+
+    Its master playlist lists three renditions - 360p30, 160p30, audio_only -
+    and streamlink fails outright on a quality the playlist does not carry. A
+    fallback ladder that walked every type at 720p and 480p therefore queued two
+    probes that could only ever fail, and paid a streamlink spawn for each one
+    in the middle of a break.
+    """
+    state = adblock.BackupState()
+    plan = state.build_plan(native_player_type="site", quality="1080p60", now=0.0)
+
+    bridge_entries = [(q, pt) for q, pt in plan if pt == adblock.FAST_BRIDGE_TYPE]
+    assert bridge_entries == [(adblock.FAST_BRIDGE_QUALITY, adblock.FAST_BRIDGE_TYPE)], (
+        "the bridge type gets exactly one attempt, at the quality it can serve"
+    )
 
 
 def test_the_upgrade_probe_will_not_settle_for_another_degraded_rendition():
@@ -146,7 +167,9 @@ async def test_the_search_tries_player_types_until_one_comes_back_clean():
         # Only the third player type is out of the break.
         return 200, (CLEAN if url.endswith("mobile_web") else AD_MARKED)
 
-    async def fake_resolve(login, *, quality, user_token, player_type, force, timeout=None):
+    async def fake_resolve(
+        login, *, quality, user_token, player_type, force, timeout=None, device_id=None
+    ):
         resolved.append(player_type)
         return f"https://video-weaver.b.hls.ttvnw.net/{player_type}"
 
@@ -188,7 +211,9 @@ async def test_the_search_gives_up_when_every_type_carries_the_ad():
     async def fake_fetch(url: str):
         return 200, AD_MARKED
 
-    async def fake_resolve(login, *, quality, user_token, player_type, force, timeout=None):
+    async def fake_resolve(
+        login, *, quality, user_token, player_type, force, timeout=None, device_id=None
+    ):
         return f"https://video-weaver.b.hls.ttvnw.net/{player_type}"
 
     from app.services import resolver

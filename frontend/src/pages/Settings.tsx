@@ -428,6 +428,7 @@ export default function Settings() {
                   ['thunderdome', 'thunderdome'],
                   ['embed', 'embed'],
                   ['autoplay', 'autoplay'],
+                  ['picture-by-picture', 'picture-by-picture (preview tier)'],
                 ].map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}

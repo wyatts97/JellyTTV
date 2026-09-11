@@ -97,6 +97,12 @@ class Settings(SQLModel, table=True):
     # without a DEFAULT, so rows predating it read back NULL rather than the
     # default above; readers coerce through resolver.resolve_player_type.
     twitch_player_type: str | None = None
+    # Stable per-install device id, sent with every Twitch request this service
+    # makes - both the access-token resolve and the ad-event report, which have
+    # to agree or they describe two different viewers. Generated on first read
+    # (see settings_store.get_settings_row); nullable for the same migration
+    # reason as the field above.
+    twitch_device_id: str | None = None
     # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
     # watched that were not; separate from blocking and independently toggleable.
     ad_spoofing: bool = True

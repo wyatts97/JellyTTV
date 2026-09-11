@@ -6,7 +6,13 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import get_config
-from app.crypto import decrypt, encrypt, random_eventsub_secret, random_token
+from app.crypto import (
+    decrypt,
+    encrypt,
+    random_device_id,
+    random_eventsub_secret,
+    random_token,
+)
 from app.models import Settings
 from app.util import utcnow
 
@@ -59,6 +65,16 @@ class ResolvedSettings:
         return f"http://localhost:{get_config().port}"
 
     @property
+    def twitch_device_id(self) -> str:
+        """The install's device id, or a blank if the row predates it.
+
+        Callers treat a blank as "send no device id at all", which is safer than
+        inventing one per call: a device id that changes every request is a
+        worse signal than none.
+        """
+        return self.row.twitch_device_id or ""
+
+    @property
     def twitch_configured(self) -> bool:
         return bool(self.twitch_client_id and self.twitch_client_secret)
 
@@ -92,6 +108,10 @@ async def get_settings_row(session: AsyncSession) -> Settings:
         await session.refresh(row)
     if not row.tuner_token:
         row.tuner_token = random_token()
+        session.add(row)
+        await session.commit()
+    if not row.twitch_device_id:
+        row.twitch_device_id = random_device_id()
         session.add(row)
         await session.commit()
     return row

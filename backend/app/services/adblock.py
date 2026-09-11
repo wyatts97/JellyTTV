@@ -30,20 +30,34 @@ from app.services import hls, resolver
 
 log = get_logger(__name__)
 
-# TTV-AB's player types. `site` is what a normal viewer uses and is therefore
-# the one most likely to be carrying the ad we are trying to escape, so it sits
-# last. `autoplay` is the fast one - it is what TTV-AB reaches for first when
-# low-quality fallback is allowed.
-BACKUP_PLAYER_TYPES = ("embed", "popout", "mobile_web", "autoplay", "site")
+# The player types worth asking for, cheapest-to-cover first. `site` is what a
+# normal viewer uses and is therefore the one most likely to be carrying the ad
+# we are trying to escape, so it sits last.
+#
+# `picture-by-picture` leads because it is the one value CoolCmd's Alternate
+# Player for Twitch.tv still bets on: that extension runs a second, ad-free
+# playlist during every break and mints it with exactly this player type, and
+# nothing else. TTV-AB's list predates it.
+BACKUP_PLAYER_TYPES = (
+    "picture-by-picture",
+    "embed",
+    "popout",
+    "mobile_web",
+    "autoplay",
+    "site",
+)
 
-# TTV-AB's fast bridge. `autoplay` is Twitch's Android autoplay tier - capped
-# around 360p, and consistently the quickest thing to come back clean, because
-# it is the least valuable inventory to stitch an ad into. Reaching for it
-# *first* means a break is covered in one probe instead of four, at the cost of
-# resolution for a few seconds. `BRIDGE_HOLD_SECONDS` is how long that bridge is
-# held before a full-quality candidate is looked for behind it (TTV-AB's
-# LQ_HQ_HOLD_MIN_MS).
-FAST_BRIDGE_TYPE = "autoplay"
+# The fast bridge - the one type tried first, at reduced quality, so a break is
+# covered in one probe instead of five.
+#
+# `picture-by-picture` is Twitch's squeezeback preview window: the small tile it
+# shows alongside an ad. Being preview-tier inventory is the whole reason it is
+# worth asking for - it is not where Twitch wants to put an ad - and is also why
+# it is assumed capped and accepted as a *bridge* rather than trusted at session
+# quality. `BRIDGE_HOLD_SECONDS` is how long that bridge is held before a
+# full-quality candidate is looked for behind it (TTV-AB's LQ_HQ_HOLD_MIN_MS);
+# `autoplay`, the previous bridge, is now an ordinary candidate in that search.
+FAST_BRIDGE_TYPE = "picture-by-picture"
 FAST_BRIDGE_QUALITY = "360p"
 BRIDGE_HOLD_SECONDS = 8.0
 
@@ -163,15 +177,17 @@ class BackupState:
         # Then the session's own quality everywhere else, so a break that a
         # normal player type can cover cleanly is only ever briefly degraded.
         plan += [(quality, pt) for pt in types if pt != FAST_BRIDGE_TYPE]
-        # Then give up resolution across the board.
+        # Then give up resolution across the board - but never on the bridge
+        # type, which is done after its one attempt above.
+        # `picture-by-picture` offers exactly three renditions, topping out at
+        # 360p, so asking it for 720p or 480p cannot succeed: streamlink fails
+        # on a quality the master playlist does not list. Those were two
+        # guaranteed-dead probes per rotation, each a streamlink spawn spent
+        # mid-break. The same was true of `autoplay` when it held this slot.
         for fallback in FALLBACK_QUALITIES:
             if fallback == quality:
                 continue
-            plan += [
-                (fallback, pt)
-                for pt in types
-                if not (pt == FAST_BRIDGE_TYPE and fallback == FAST_BRIDGE_QUALITY)
-            ]
+            plan += [(fallback, pt) for pt in types if pt != FAST_BRIDGE_TYPE]
         return plan
 
 
@@ -212,6 +228,7 @@ async def find_backup(
     state: BackupState,
     fetch,
     user_token: str | None = None,
+    device_id: str | None = None,
     full_quality_only: bool = False,
 ) -> BackupCandidate | None:
     """Try **one** backup candidate. Call again next poll to try the next.
@@ -257,6 +274,7 @@ async def find_backup(
             state=state,
             fetch=fetch,
             user_token=user_token,
+            device_id=device_id,
             session_quality=quality,
         )
     finally:
@@ -292,6 +310,7 @@ async def _try_candidate(
     state: BackupState,
     fetch,
     user_token: str | None,
+    device_id: str | None,
     session_quality: str,
 ) -> BackupCandidate | None:
     """Resolve and validate one player type. None means "not this one"."""
@@ -306,6 +325,10 @@ async def _try_candidate(
             player_type=player_type,
             force=True,
             timeout=resolver.BACKUP_RESOLVE_TIMEOUT,
+            # Same device id as the native resolve: a backup is meant to look
+            # like the same viewer asking for a different player, not a second
+            # viewer appearing the moment an ad starts.
+            device_id=device_id,
         )
     except resolver.ChannelOffline:
         # The channel itself is gone; no player type will help. Cool the whole
