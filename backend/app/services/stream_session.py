@@ -715,6 +715,24 @@ async def _apply_backup(
         # look like a dead channel. Start one, hold the picture meanwhile, and
         # pick the result up on a later poll.
         candidate = _take_backup_result(session)
+        if candidate is not None and candidate.is_stale(now):
+            # Found before the break needed it - by the prefetch above - and old
+            # enough that "clean" no longer means anything. Promoting it anyway
+            # costs more than dropping it: `_serve_backup` would re-validate,
+            # find the ad, and cool this player type down as ad-marked for the
+            # rest of the break, which throws away the type most likely to come
+            # back clean on the strength of a stale verdict.
+            #
+            # So it is discarded *without* a penalty and the search restarted.
+            # That is exactly the behaviour before the prefetch existed: hold
+            # this poll, splice on the next one.
+            log.info(
+                "discarding a stale backup candidate; searching again",
+                login=session.login,
+                player_type=candidate.player_type,
+                age=round(now - candidate.found_at, 1),
+            )
+            candidate = None
         if candidate is None:
             # Nothing to splice yet; the caller holds this poll and picks the
             # result up on a later one.

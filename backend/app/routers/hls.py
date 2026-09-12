@@ -128,6 +128,13 @@ async def _channel_quality(
         raise HTTPException(status_code=404, detail=f"channel {login} is not tracked")
     if not channel.enabled or not channel.live_enabled:
         raise HTTPException(status_code=409, detail=f"{channel.display_name} is disabled")
+    if settings.row.ad_free_source:
+        # `picture-by-picture` offers audio_only/160p/360p and nothing else, so
+        # a channel pinned to 1080p60 would make streamlink fail on a rendition
+        # that is simply not in this player type's master playlist. "best" asks
+        # for the top of whatever ladder it does offer, which is 360p today and
+        # stays correct if Twitch ever widens it.
+        return "best"
     return channel.quality or settings.row.default_quality or "best"
 
 
@@ -147,7 +154,11 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
                 login,
                 quality=quality,
                 user_token=settings.twitch_user_token,
-                player_type=settings.row.twitch_player_type,
+                player_type=(
+                    resolver.AD_FREE_PLAYER_TYPE
+                    if settings.row.ad_free_source
+                    else settings.row.twitch_player_type
+                ),
                 device_id=settings.twitch_device_id,
                 # Awaited inside the session lock, so a slow streamlink stalls
                 # every poll for this channel - far longer than
@@ -181,7 +192,11 @@ def _make_backup_finder(login: str, settings: ResolvedSettings):
     without notice) and a strip-only mode that simply played the ad. Both are
     gone, so there is nothing left to branch on.
     """
-    if not settings.row.strip_ads:
+    if not settings.row.strip_ads or settings.row.ad_free_source:
+        # In ad-free mode there is nothing to escape from, and the rotation has
+        # nothing to offer anyway: every other player type is stitched at the
+        # same moment the native stream is. Searching would only spend
+        # streamlink spawns and cooldowns to arrive back where we started.
         return None
 
     async def find(
@@ -328,7 +343,17 @@ async def _session_playlist(
                 variant=variant,
                 backup=_make_backup_finder(login, settings),
                 report_ads=_make_ad_reporter(settings),
-                hold_uri=_make_hold_uri(base, login, key_suffix),
+                # No hold in ad-free mode. The hold is a black segment, and
+                # the whole point of this mode is that nothing should ever be
+                # black. If an ad ever does turn up on this player type, the
+                # session passes it through instead - an ad keeps the timeline
+                # moving, where an unbounded hold is the dead channel we are
+                # trying to eliminate.
+                hold_uri=(
+                    None
+                    if settings.row.ad_free_source
+                    else _make_hold_uri(base, login, key_suffix)
+                ),
             ),
             timeout=PLAYLIST_DEADLINE_SECONDS,
         )

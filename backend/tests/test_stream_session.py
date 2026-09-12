@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -547,6 +548,58 @@ async def test_a_clean_stream_never_starts_a_backup_search():
 
     assert searches["n"] == 0
     assert all(r.backup_player_type is None for r in renders)
+
+
+async def test_a_stale_prefetched_candidate_is_dropped_not_spliced():
+    """A clean verdict expires, and promoting an expired one costs the break.
+
+    Starting the search at the live edge means a candidate can be found well
+    before the break needs it. Twitch can stitch an ad into that player type in
+    the meantime, and `_serve_backup` re-validates on promotion - so splicing a
+    stale candidate does not serve an ad, but it does cool that player type down
+    as ad-marked, which discards the type most likely to come back clean for the
+    rest of the break. Observed live: a candidate found 25s early was burned on
+    the first poll that needed it.
+
+    So a stale one is dropped without a penalty and the search restarted.
+    """
+    native = [
+        build_playlist(start_seq=100, count=4),
+        # Mixed - the pod is at the live edge, so a search starts here.
+        build_playlist(start_seq=102, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
+        # Now the pod fills the window and wants a backup.
+        build_playlist(start_seq=106, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
+        build_playlist(start_seq=110, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
+        build_playlist(start_seq=114, count=4),
+    ]
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False):
+        searches["n"] += 1
+        # The first verdict is already expired by the time it is wanted; the
+        # replacement search returns a fresh one.
+        age = 30.0 if searches["n"] == 1 else 0.0
+        return stream_session.BackupCandidate(
+            player_type="picture-by-picture",
+            quality=quality,
+            url="https://video-weaver.b.hls.ttvnw.net/backup.m3u8",
+            playlist=build_backup_playlist(start_seq=200),
+            found_at=time.monotonic() - age,
+        )
+
+    renders, _ = await poll_all(native, backup=find_backup)
+    session = stream_session.get("adapt", "best")
+
+    # The stale verdict is not spliced...
+    assert renders[2].backup_player_type is None
+    assert HOLD_URI_PREFIX in renders[2].text, "the break should hold for that poll"
+    # ...and crucially the player type is left in the rotation rather than cooled
+    # down on the strength of information that had expired.
+    assert "picture-by-picture" not in session.backup.cooldowns
+    # The replacement search covers the very next poll.
+    assert searches["n"] >= 2
+    assert renders[3].backup_player_type == "picture-by-picture"
+    assert_playlist_continuity([r.text for r in renders])
 
 
 async def test_native_resumes_only_after_several_clean_polls():

@@ -39,6 +39,7 @@ export interface Settings {
   proxy_enabled: boolean
   strip_ads: boolean
   proxy_segments: boolean
+  ad_free_source: boolean
   twitch_player_type: string
   ad_spoofing: boolean
   default_quality: string

@@ -51,6 +51,7 @@ class SettingsUpdate(BaseModel):
     proxy_enabled: bool | None = None
     strip_ads: bool | None = None
     proxy_segments: bool | None = None
+    ad_free_source: bool | None = None
     # Constrained, because a typo here silently reverts you to the ad-bearing
     # path: Twitch treats an unrecognised playerType as its default.
     twitch_player_type: Literal[PLAYER_TYPES] | None = None  # type: ignore[valid-type]
@@ -92,6 +93,7 @@ class SettingsOut(BaseModel):
     proxy_enabled: bool
     strip_ads: bool
     proxy_segments: bool
+    ad_free_source: bool
     twitch_player_type: str
     ad_spoofing: bool
     default_quality: str
@@ -284,6 +286,7 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         proxy_enabled=row.proxy_enabled,
         strip_ads=row.strip_ads,
         proxy_segments=row.proxy_segments,
+        ad_free_source=row.ad_free_source,
         # Coerced, not passed through: the additive migration adds this column
         # without a DEFAULT, so rows predating it read back NULL and a bare
         # pass-through would fail response validation on a non-optional str.

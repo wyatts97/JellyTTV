@@ -68,6 +68,17 @@ PLAYER_TYPES = (
 )
 
 
+# The one player type Twitch does not stitch ads into.
+#
+# Measured live against three channels over seven ad breaks: every player type
+# offering the full rendition ladder - `web`, `embed`, `popout`, `mobile_web`,
+# `site` - carries the pod at the same moment the native stream does, and so
+# does `autoplay`. Only this one stays clean, and it is capped at 360p. That
+# trade is the whole basis of `ad_free_source` mode: there is no such thing as
+# an ad-free 1080p source to switch to, so the choice is 360p or ads.
+AD_FREE_PLAYER_TYPE = "picture-by-picture"
+
+
 def resolve_player_type(value: str | None) -> str:
     """Normalise the configured player type (NULL/blank -> the default)."""
     return (value or "").strip() or DEFAULT_PLAYER_TYPE

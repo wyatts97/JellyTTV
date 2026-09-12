@@ -164,7 +164,22 @@ If you see drift:
 
 ## The picture goes black during ad breaks
 
-That is the hold, and it means no clean backup was found — not that ad blocking
+First check **Settings → Always use the ad-free source**. With it on, this
+should not happen at all: the stream comes from `picture-by-picture`, which is
+never ad-stitched, so there is no break to cover, nothing is ever swapped in,
+and the hold is not wired up. If you are seeing black with that setting on, the
+cause is not ad handling — look at *Nothing plays* instead.
+
+Everything below applies only when that setting is **off**.
+
+Be aware that switching sources no longer works well. Measured across three
+channels and seven breaks: every player type offering more than 360p —
+`web`, `embed`, `popout`, `mobile_web`, `site` — is stitched at the same moment
+the native stream is, and so is `autoplay`. `picture-by-picture` is the only
+clean one, so with the ad-free source off, most breaks have nothing to switch
+to and the hold is what plays.
+
+That hold means no clean backup was found — not that ad blocking
 failed. Coverage comes from the backup search, which asks Twitch for the same
 channel on a different `playerType`; ads are stitched per token, so another
 token is usually still carrying the live video. When every player type is in the
@@ -184,7 +199,10 @@ upstream and so avoids the question entirely.
 
 ## Ads still play
 
-- Ad blocking only works with **Settings → Proxy playlists through JellyTTV**
+- The reliable fix is **Settings → Always use the ad-free source**, which plays
+  a player type Twitch does not stitch ads into at all. Everything below is
+  about the fallback path used when that is off.
+- That fallback needs **Settings → Proxy playlists through JellyTTV**
   and **Block ads** both enabled.
 - Twitch changes its ad-stitching format periodically. Set `JELLYTTV_LOG_LEVEL=DEBUG` and look for
   `stripped twitch ad segments`. If the count is always 0 during an ad break, the detection heuristic

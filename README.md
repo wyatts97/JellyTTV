@@ -10,8 +10,11 @@ channels** (with a real EPG), and past broadcasts as **episodes** of a per-chann
 - **Live TV** — JellyTTV serves a dynamic M3U playlist and XMLTV guide. Point Jellyfin's *M3U
   Tuner* at it and every tracked channel becomes a Live TV channel showing the current title,
   category and viewer count in the guide.
-- **Ad stripping** — playlists are proxied and Twitch's stitched ad segments are removed before
-  Jellyfin ever sees them.
+- **No ads, no interruptions** — every channel is served from `picture-by-picture`, the one Twitch
+  player type that is never ad-stitched, so a break is simply not there: no ad, no black screen,
+  no frozen picture. That player type tops out at **360p**, which is the deliberate trade. Turn
+  *Always use the ad-free source* off to watch at full quality and have breaks covered by
+  switching sources instead.
 - **VODs as episodes** — each channel becomes a Jellyfin *Series*; each broadcast becomes an
   episode with proper NFO metadata, artwork and stable `SxxExxxx` numbering. Choose per channel
   between zero-storage `.strm` links or full yt-dlp archiving with retention rules.

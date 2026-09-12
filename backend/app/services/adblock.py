@@ -87,6 +87,20 @@ COOLDOWNS = {
 # meant a continuous stream of streamlink spawns for the length of the pod.
 EXHAUSTED_COOLDOWN = 30.0
 
+# How long a candidate's "clean" verdict is worth anything.
+#
+# A candidate is accepted on the strength of one playlist fetched at one moment.
+# That playlist covers a few seconds of a live stream, so the verdict expires
+# about as fast: the same player type can be clean when probed and stitched
+# moments later - which is exactly what happens when a search is started early,
+# before the break has filled the window.
+#
+# Promoting a verdict older than this is worse than having none, because
+# `_serve_backup` re-validates on promotion, finds the ad, and cools the type
+# down for `COOLDOWNS["ad-marked"]` - removing the best candidate from the
+# rotation for the rest of the break on the strength of stale information.
+CANDIDATE_STALE_SECONDS = 8.0
+
 # Consecutive clean polls of the native stream before switching back. Matches
 # TTV-AB's AD_END_MIN_CLEAN_PLAYLISTS: one clean poll is routinely a gap between
 # two pods rather than the end of the break.
@@ -104,6 +118,15 @@ class BackupCandidate:
     # True when this was accepted at a lower quality than the session asked for.
     # The session holds it as a bridge and probes for full quality behind it.
     is_bridge: bool = False
+    # When the playlist backing this verdict was fetched (`time.monotonic`).
+    # Defaults to construction time because that is the truth - a candidate is
+    # built from a playlist just fetched - and because a zero default would make
+    # every candidate born stale against a monotonic clock.
+    found_at: float = field(default_factory=time.monotonic)
+
+    def is_stale(self, now: float) -> bool:
+        """Has this candidate's clean verdict expired? See CANDIDATE_STALE_SECONDS."""
+        return now - self.found_at > CANDIDATE_STALE_SECONDS
 
 
 @dataclass

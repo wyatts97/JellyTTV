@@ -388,14 +388,22 @@ export default function Settings() {
             description="Required for ad stripping. Turning this off makes JellyTTV redirect Jellyfin straight to Twitch."
           />
           <Toggle
-            checked={Boolean(get('strip_ads'))}
+            checked={Boolean(get('ad_free_source'))}
             disabled={!get('proxy_enabled')}
+            onChange={(v) => set('ad_free_source', v)}
+            label="Always use the ad-free source (360p)"
+            description="Plays every channel from Twitch's picture-by-picture player type, the only one Twitch never stitches ads into. Nothing has to be swapped in mid-break, so the stream never goes black, never freezes on a resolution change, and never shows an ad. The catch is that this player type only offers up to 360p, so it trades picture quality for an uninterrupted stream. Turn off to watch at full quality and handle breaks by switching sources instead."
+          />
+          <Toggle
+            checked={Boolean(get('strip_ads'))}
+            disabled={!get('proxy_enabled') || Boolean(get('ad_free_source'))}
             onChange={(v) => set('strip_ads', v)}
             label="Block ads"
-            description="During a break, plays the same channel from a Twitch player type that isn't in that break — ads are stitched per stream token, so another token is usually still carrying the live video. Quality may drop for a few seconds while a clean source is found; if none exists yet the picture holds on black rather than showing the ad. Turn off to watch the raw Twitch feed, ads and all."
+            description="Only used when the ad-free source above is off. During a break, plays the same channel from another Twitch player type and holds on black while a clean one is found. Note that every player type offering more than 360p is now stitched at the same moment the native stream is, so a break usually means black."
           />
           <Toggle
             checked={Boolean(get('ad_spoofing'))}
+            disabled={Boolean(get('ad_free_source'))}
             onChange={(v) => set('ad_spoofing', v)}
             label="Report blocked ads as watched"
             description="Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."

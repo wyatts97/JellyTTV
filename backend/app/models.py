@@ -103,6 +103,13 @@ class Settings(SQLModel, table=True):
     # (see settings_store.get_settings_row); nullable for the same migration
     # reason as the field above.
     twitch_device_id: str | None = None
+    # Serve every live stream from Twitch's `picture-by-picture` player type,
+    # which is the only one that is never ad-stitched. Nothing then has to be
+    # substituted, held or spliced during a break, so the stream never blacks
+    # out, never freezes on a mid-timeline resolution change, and never shows an
+    # ad. The cost is that this player type is capped at 360p, so it is a
+    # deliberate trade of picture quality for an uninterrupted stream.
+    ad_free_source: bool = True
     # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
     # watched that were not; separate from blocking and independently toggleable.
     ad_spoofing: bool = True
