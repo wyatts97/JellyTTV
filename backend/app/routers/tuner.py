@@ -27,6 +27,7 @@ async def playlist(session: Annotated[AsyncSession, Depends(get_db)]) -> Respons
         base_url=settings.self_base_url,
         token=settings.row.tuner_token,
         include_offline=settings.row.tuner_include_offline,
+        live_delivery=settings.row.live_delivery,
     )
     return Response(
         content=body,

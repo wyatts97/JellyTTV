@@ -40,6 +40,7 @@ export interface Settings {
   strip_ads: boolean
   proxy_segments: boolean
   ad_free_source: boolean
+  live_delivery: 'ts' | 'hls'
   twitch_player_type: string
   ad_spoofing: boolean
   default_quality: string

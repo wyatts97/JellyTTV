@@ -19,10 +19,16 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.db import get_db
 from app.routers.hls import _channel_quality, _fetch_playlist, _make_resolver
 from app.security import AdminUser
-from app.services import resolver, stream_session
+from app.services import live_stream, resolver, stream_session
 from app.services.settings_store import get_settings
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
+
+
+@router.get("/streams")
+async def live_streams(_user: AdminUser) -> dict:
+    """Live TS streams in progress: one streamlink process each."""
+    return {"active": live_stream.active_count(), "streams": live_stream.snapshot()}
 
 
 @router.get("/hls/sessions")

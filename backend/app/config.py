@@ -52,6 +52,32 @@ class AppConfig(BaseSettings):
     # Idle time before an inactive stream session is discarded.
     stream_session_idle_seconds: int = 90
 
+    # Live delivery as MPEG-TS from `streamlink --stdout` (services.live_stream).
+    # One streamlink process per open stream, so this caps the processes too.
+    max_live_streams: int = 8
+    # How long to wait for the first TS bytes before answering 503. streamlink
+    # has to fetch an access token, the master playlist and the first segment
+    # before anything reaches stdout.
+    live_startup_timeout_seconds: float = 30.0
+    # Passed straight through to streamlink's own HLS client.
+    live_segment_attempts: int = 3
+    live_segment_timeout_seconds: float = 10.0
+    live_stream_timeout_seconds: float = 60.0
+    live_hls_live_edge: int = 3
+    # Twitch declares EXT-X-TARGETDURATION:6 over 2-second segments, and
+    # streamlink reloads at the target duration by default - so it would pick up
+    # three segments at a time and emit them in 6-second bursts. "segment"
+    # reloads once per segment instead, keeping the byte flow smooth.
+    live_playlist_reload_time: str = "segment"
+    # streamlink never refreshes its token or re-resolves mid-stream: when its
+    # playlist url stops working it just exits. Rather than end the response
+    # and rely on Jellyfin to reopen the tuner, the stream restarts streamlink in
+    # place. These bound that: spawn attempts per restart, the backoff between
+    # them, and how many restarts in a 5-minute window before giving up.
+    live_restart_attempts: int = 5
+    live_restart_backoff_seconds: float = 1.0
+    live_max_restarts_per_window: int = 6
+
     # Guide window (hours) rendered into the XMLTV output.
     guide_window_hours: int = 48
 

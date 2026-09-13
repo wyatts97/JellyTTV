@@ -28,24 +28,26 @@ docker compose logs -f api worker
 ## A channel plays nothing / errors immediately
 
 ```bash
-curl -sv "http://localhost:8730/hls/SOMELOGIN/master.m3u8?key=YOUR_KEY"
+curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8730/stream/SOMELOGIN.ts?key=YOUR_KEY" --max-time 15
 ```
 
 | Response | Meaning |
 |---|---|
+| `200` and bytes keep arriving | JellyTTV is streaming; the problem is in Jellyfin — see *stutters, pauses* below. |
 | `503 … is offline` | The channel genuinely is not live. |
-| `502 could not resolve stream` | streamlink and yt-dlp both failed — see below. |
+| `503 could not start …` | streamlink failed to start the stream. The message carries streamlink's own reason. |
+| `503 all N live stream slots are in use` | Raise `JELLYTTV_MAX_LIVE_STREAMS`, or stop streams nobody is watching. |
 | `404 channel … is not tracked` | Login mismatch; the channel was renamed on Twitch. |
-| A playlist of `.ts` URLs | JellyTTV is fine; the problem is in Jellyfin/ffmpeg. |
 
-For resolver failures, test the tooling directly:
+To test streamlink directly, run the same kind of command JellyTTV runs:
 
 ```bash
-docker compose exec api streamlink --stream-url https://www.twitch.tv/SOMELOGIN best
-docker compose exec api yt-dlp -g https://www.twitch.tv/SOMELOGIN
+docker compose exec api streamlink --stdout \
+  --twitch-access-token-param playerType=picture-by-picture \
+  https://www.twitch.tv/SOMELOGIN best | head -c 1000000 | wc -c
 ```
 
-Common causes: outdated streamlink/yt-dlp after a Twitch backend change (`docker compose pull &&
+Common causes: an outdated streamlink after a Twitch backend change (`docker compose pull &&
 docker compose up -d`), subscriber-only content (add a user OAuth token in Settings), or the host
 being geo/IP-blocked by Twitch.
 
@@ -72,8 +74,7 @@ curl -s "http://localhost:8730/api/debug/hls/FAILING?fmt=json" | jq '.upstream, 
 break. Then time the endpoint itself — it must answer promptly even mid-break:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code} %{time_total}
-'   "http://localhost:8730/hls/FAILING/master.m3u8?key=YOUR_KEY"
+curl -s -o /dev/null -w '%{http_code} %{time_total}\n' "http://localhost:8730/hls/FAILING/master.m3u8?key=YOUR_KEY"
 ```
 
 Anything above a couple of seconds is a bug: the backup-stream search runs
@@ -83,31 +84,49 @@ detached from the request and `PLAYLIST_DEADLINE_SECONDS` caps the handler. Chec
 
 ## A channel stutters, pauses, or dies after a few minutes
 
-Almost always a playlist-continuity problem, and it only shows up on channels
-that actually run stitched ads or get moved between Twitch's `video-weaver`
-nodes — which is why one channel can be perfect while another is unwatchable.
+First confirm **Settings → Live delivery** is *MPEG-TS via streamlink*. The legacy HLS proxy is the
+known cause of this symptom: a recreated session restarted its playlist numbering at 0, which makes
+Jellyfin's ffmpeg wait for segments that never come until it gives up. The MPEG-TS path has no
+playlist at all, so that failure cannot happen there.
 
-Start with the HLS debug endpoint (admin session required, not the tuner key):
+With MPEG-TS delivery, see what JellyTTV is doing (admin session required, not the tuner key):
+
+```bash
+curl -s "http://localhost:8730/api/debug/streams"
+docker compose logs -f api | grep -i "live stream\|streamlink"
+```
+
+| What you see | Meaning |
+|---|---|
+| `megabytes` climbing steadily | JellyTTV is delivering. A pause is downstream, in Jellyfin. |
+| `streamlink exited mid-stream` then `live stream restarted in place` | streamlink's playlist url expired or Twitch dropped the connection. The stream is restarted inside the same response, so Jellyfin sees a short gap, not an end. Occasional restarts on a long watch are normal. |
+| `live stream keeps dropping; ending it` | Restarts happened too often in five minutes. The `stderr_tail` in that line says why. |
+| `broadcast ended; closing live stream` | The streamer went offline. Expected. |
+| No `live stream started` at all while playing | Jellyfin is not using the `.ts` url — refresh its guide (see [Jellyfin setup](jellyfin-setup.md)). |
+
+If JellyTTV is delivering steadily and playback still pauses, the remaining causes are in Jellyfin 12:
+
+- **A simultaneous stream limit is set on the M3U tuner.** That disables direct play, so Jellyfin
+  re-muxes the stream, which is the path with its timestamp/judder bug
+  [#17788](https://github.com/jellyfin/jellyfin/issues/17788). Leave the limit blank.
+- **The first play after restarting Jellyfin fails**, then works on retry — open Jellyfin bug
+  [#17593](https://github.com/jellyfin/jellyfin/issues/17593).
+- **Very long sessions** grow Jellyfin's live buffer file without limit — open Jellyfin PR
+  [#17128](https://github.com/jellyfin/jellyfin/pull/17128). Stopping and restarting playback clears it.
+
+### Legacy HLS delivery
+
+Only relevant with **Live delivery → Legacy HLS proxy**. The HLS debug endpoint prints the raw
+upstream playlist next to the one JellyTTV serves:
 
 ```bash
 curl -s "http://localhost:8730/api/debug/hls/SOMELOGIN?fmt=text"
 ```
 
-It prints the raw upstream playlist and the playlist JellyTTV hands to Jellyfin
-side by side, plus per-segment detail. What to look for:
-
-| Field | Meaning |
-|---|---|
-| `AD[daterange]` on most/all segments | Ad detection is over-matching. If stripping would empty the playlist, JellyTTV passes the pod through instead and logs `ad pod with no backup - passing it through` — you get ads, not a hole. |
-| `low latency: True` with `dropped=` | Twitch sent LL-HLS tags. These are dropped deliberately; their URIs are relative to the upstream host and would break any client that followed them. |
-| `session` → `media_sequence` | Must only ever increase. Poll a few times; if it moves backwards, that is a bug worth reporting. |
-| `upstream mseq` vs session `media_sequence` | They are unrelated by design. JellyTTV assigns its own sequence numbers so ad removal and weaver switches stay invisible to the player. |
-
-`GET /api/debug/hls/sessions` lists every active session with its sequence
-bookkeeping and how many times it has had to re-resolve. A steadily climbing
-`resolves` count means Twitch keeps dropping the upstream.
-
-Add `?refresh=1` to force a fresh streamlink resolve and start a new session.
+`GET /api/debug/hls/sessions` lists every active session. A `media_sequence` that ever moves
+backwards will freeze Jellyfin's player; so will a steadily climbing `resolves` count. Note that
+`?refresh=1` on the debug endpoint drops the live session and resets its numbering, which itself
+interrupts anyone watching.
 
 ## Audio drifts out of sync with video
 

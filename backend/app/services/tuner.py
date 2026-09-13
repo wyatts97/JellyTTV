@@ -10,7 +10,7 @@ maps channels to guide data automatically.
 Offline channels are kept in the playlist by default: Jellyfin keys channels by
 id, and removing/re-adding them churns its database and loses user favourites.
 They get a `<channel>` entry but no programmes, so they never appear in "On Now";
-the note above `_stream_url` explains why that is the encoding rather than a
+the note above `stream_url` explains why that is the encoding rather than a
 placeholder.
 """
 
@@ -40,8 +40,28 @@ from app.util import twitch_thumbnail, utcnow, xmltv_time
 # id, and any favourite) in the Channels list either way.
 
 
-def _stream_url(base_url: str, channel: Channel, token: str | None) -> str:
-    url = f"{base_url.rstrip('/')}/hls/{quote(channel.twitch_login)}/master.m3u8"
+LIVE_DELIVERY_TS = "ts"
+LIVE_DELIVERY_HLS = "hls"
+LIVE_DELIVERIES = (LIVE_DELIVERY_TS, LIVE_DELIVERY_HLS)
+
+
+def resolve_live_delivery(value: str | None) -> str:
+    """Normalise the stored setting; anything unrecognised means the default."""
+    return value if value in LIVE_DELIVERIES else LIVE_DELIVERY_TS
+
+
+def stream_url(
+    base_url: str, channel: Channel, token: str | None, live_delivery: str | None = None
+) -> str:
+    login = quote(channel.twitch_login)
+    base = base_url.rstrip("/")
+    # The `.ts` suffix is load-bearing: Jellyfin picks its MPEG-TS handling for
+    # a tuner url by extension. Channel identity comes from `tvg-id`, not the
+    # url, so switching delivery keeps every channel id and favourite.
+    if resolve_live_delivery(live_delivery) == LIVE_DELIVERY_HLS:
+        url = f"{base}/hls/{login}/master.m3u8"
+    else:
+        url = f"{base}/stream/{login}.ts"
     if token:
         url += f"?key={quote(token)}"
     return url
@@ -53,6 +73,7 @@ def build_m3u(
     base_url: str,
     token: str | None,
     include_offline: bool = True,
+    live_delivery: str | None = None,
 ) -> str:
     lines = ['#EXTM3U x-tvg-url="' + f"{base_url.rstrip('/')}/tuner/guide.xml" + '"']
 
@@ -71,7 +92,7 @@ def build_m3u(
             attrs.append(f'tvg-logo="{channel.avatar_url}"')
 
         lines.append(f"#EXTINF:-1 {' '.join(attrs)},{channel.display_name}")
-        lines.append(_stream_url(base_url, channel, token))
+        lines.append(stream_url(base_url, channel, token, live_delivery))
 
     return "\n".join(lines) + "\n"
 

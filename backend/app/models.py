@@ -110,6 +110,12 @@ class Settings(SQLModel, table=True):
     # ad. The cost is that this player type is capped at 360p, so it is a
     # deliberate trade of picture quality for an uninterrupted stream.
     ad_free_source: bool = True
+    # How live channels reach Jellyfin. "ts" (the default) is one continuous
+    # MPEG-TS stream produced by streamlink - see services.live_stream. "hls" is
+    # the legacy rewritten-playlist proxy, kept only as a rollback. Nullable for
+    # the additive-migration reason described on `twitch_player_type`; readers
+    # coerce through tuner.resolve_live_delivery.
+    live_delivery: str | None = "ts"
     # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
     # watched that were not; separate from blocking and independently toggleable.
     ad_spoofing: bool = True

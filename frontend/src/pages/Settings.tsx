@@ -117,6 +117,8 @@ export default function Settings() {
   const get = <K extends keyof SettingsData>(key: K): SettingsData[K] =>
     (draft[key as string] as SettingsData[K]) ?? current[key]
   const set = (key: string, value: unknown) => setDraft((d) => ({ ...d, [key]: value }))
+  // Proxy, ad-blocking and segment options only exist on the legacy HLS path.
+  const legacyHls = get('live_delivery') === 'hls'
   const setSecret = (key: string, value: string) => setSecrets((s) => ({ ...s, [key]: value }))
   const dirty = Object.keys(draft).length > 0 || Object.keys(secrets).length > 0
 
@@ -381,39 +383,60 @@ export default function Settings() {
       <Card>
         <CardHeader title="Streaming" description="How stream bytes get from Twitch to Jellyfin." />
         <CardBody className="space-y-1">
-          <Toggle
-            checked={Boolean(get('proxy_enabled'))}
-            onChange={(v) => set('proxy_enabled', v)}
-            label="Proxy playlists through JellyTTV"
-            description="Required for ad stripping. Turning this off makes JellyTTV redirect Jellyfin straight to Twitch."
-          />
+          <div className="pb-3">
+            <Field
+              label="Live delivery"
+              hint="MPEG-TS hands Jellyfin one continuous stream from streamlink, which reloads, retries and reconnects on its own - there is no playlist for Jellyfin's player to lose its place in. Legacy HLS is the old rewritten-playlist proxy, kept only as a fallback; it is the source of the freezes and black screens this setting replaces. Changing it asks Jellyfin to refresh its guide so it picks up the new stream urls."
+            >
+              <Select
+                value={String(get('live_delivery') ?? 'ts')}
+                onChange={(e) => set('live_delivery', e.target.value as 'ts' | 'hls')}
+              >
+                {[
+                  ['ts', 'MPEG-TS via streamlink (recommended)'],
+                  ['hls', 'Legacy HLS proxy'],
+                ].map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
           <Toggle
             checked={Boolean(get('ad_free_source'))}
-            disabled={!get('proxy_enabled')}
+            disabled={legacyHls && !get('proxy_enabled')}
             onChange={(v) => set('ad_free_source', v)}
             label="Always use the ad-free source (360p)"
             description="Plays every channel from Twitch's picture-by-picture player type, the only one Twitch never stitches ads into. Nothing has to be swapped in mid-break, so the stream never goes black, never freezes on a resolution change, and never shows an ad. The catch is that this player type only offers up to 360p, so it trades picture quality for an uninterrupted stream. Turn off to watch at full quality and handle breaks by switching sources instead."
           />
           <Toggle
+            checked={Boolean(get('proxy_enabled'))}
+            disabled={!legacyHls}
+            onChange={(v) => set('proxy_enabled', v)}
+            label="Proxy playlists through JellyTTV"
+            description="Legacy HLS only. Required for ad stripping there; turning it off makes JellyTTV redirect Jellyfin straight to Twitch."
+          />
+          <Toggle
             checked={Boolean(get('strip_ads'))}
-            disabled={!get('proxy_enabled') || Boolean(get('ad_free_source'))}
+            disabled={!legacyHls || !get('proxy_enabled') || Boolean(get('ad_free_source'))}
             onChange={(v) => set('strip_ads', v)}
             label="Block ads"
-            description="Only used when the ad-free source above is off. During a break, plays the same channel from another Twitch player type and holds on black while a clean one is found. Note that every player type offering more than 360p is now stitched at the same moment the native stream is, so a break usually means black."
+            description="Legacy HLS only, and only when the ad-free source above is off. During a break, plays the same channel from another Twitch player type and holds on black while a clean one is found. Note that every player type offering more than 360p is now stitched at the same moment the native stream is, so a break usually means black."
           />
           <Toggle
             checked={Boolean(get('ad_spoofing'))}
-            disabled={Boolean(get('ad_free_source'))}
+            disabled={!legacyHls || Boolean(get('ad_free_source'))}
             onChange={(v) => set('ad_spoofing', v)}
             label="Report blocked ads as watched"
-            description="Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."
+            description="Legacy HLS only. Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."
           />
           <Toggle
             checked={Boolean(get('proxy_segments'))}
-            disabled={!get('proxy_enabled')}
+            disabled={!legacyHls || !get('proxy_enabled')}
             onChange={(v) => set('proxy_segments', v)}
             label="Proxy video segments too"
-            description="Off (recommended) redirects segments to Twitch's CDN. Turn on only if the Jellyfin host cannot reach Twitch directly — it costs bandwidth and CPU."
+            description="Legacy HLS only. Off (recommended) redirects segments to Twitch's CDN. Turn on only if the Jellyfin host cannot reach Twitch directly — it costs bandwidth and CPU."
           />
           <Toggle
             checked={Boolean(get('tuner_include_offline'))}

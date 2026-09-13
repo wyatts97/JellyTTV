@@ -22,6 +22,7 @@ from app.routers import (
     api_vods,
     eventsub,
     hls,
+    stream,
     tuner,
 )
 from app.services import http as shared_http
@@ -92,6 +93,7 @@ app.include_router(api_vods.router)
 app.include_router(api_system.router)
 app.include_router(api_debug.router)
 app.include_router(tuner.router)
+app.include_router(stream.router)
 app.include_router(hls.router)
 app.include_router(eventsub.router)
 

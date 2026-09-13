@@ -20,7 +20,7 @@ Grab the exact URLs (including the tuner key) from **JellyTTV → Settings → A
 |---|---|
 | Tuner Type | **M3U Tuner** |
 | File or URL | `http://jellyttv:8730/tuner/playlist.m3u?key=YOUR_KEY` |
-| Simultaneous stream limit | How many Twitch streams you want playable at once |
+| Simultaneous stream limit | **Leave blank** (see below) |
 
 The URL must be reachable **from the Jellyfin server**. If Jellyfin and JellyTTV are in the same
 compose project use `http://api:8730`; otherwise use the LAN IP of the JellyTTV host. Never
@@ -28,6 +28,20 @@ compose project use `http://api:8730`; otherwise use the LAN IP of the JellyTTV 
 
 Set this value in JellyTTV under **Settings → JellyTTV base URL**, because it is also baked into
 every `.strm` file.
+
+**Why the stream limit should stay blank.** Each channel is delivered as one continuous MPEG-TS
+stream (`/stream/{login}.ts`). Jellyfin 12 can *direct play* that — hand it to the client without
+re-muxing — but it switches direct play off for any M3U tuner that has a simultaneous stream limit
+set ([`M3UTunerHost`](https://github.com/jellyfin/jellyfin/blob/v12.0/src/Jellyfin.LiveTv/TunerHosts/M3UTunerHost.cs)).
+Re-muxing a live source is the path with Jellyfin's open timestamp/judder bug
+[#17788](https://github.com/jellyfin/jellyfin/issues/17788), so leave the limit blank and cap
+concurrent streams in JellyTTV instead, with `JELLYTTV_MAX_LIVE_STREAMS` (default 8).
+
+**Upgrading from a version that served `.m3u8` tuner urls.** Jellyfin keeps each channel's url in
+memory. After upgrading, run **Dashboard → Scheduled Tasks → Refresh Guide** (or restart Jellyfin)
+so it picks up the new `.ts` urls. Channel ids come from `tvg-id`, not the url, so your channels and
+favourites are kept. If a channel then fails on its first play, delete Jellyfin's
+`cache/mediainfo/` directory: it caches probe results per stream and may still hold the old HLS ones.
 
 ## 2. Guide data
 
@@ -86,11 +100,11 @@ curl -s "http://localhost:8730/tuner/playlist.m3u?key=YOUR_KEY" | head
 # Guide should contain <programme> entries
 curl -s "http://localhost:8730/tuner/guide.xml?key=YOUR_KEY" | head -30
 
-# A live channel should return a playlist of .ts segments
-curl -s "http://localhost:8730/hls/SOMELOGIN/master.m3u8?key=YOUR_KEY" | head
+# A live channel should stream MPEG-TS: every packet starts with the byte 0x47 ("G")
+curl -s "http://localhost:8730/stream/SOMELOGIN.ts?key=YOUR_KEY" | head -c 188 | head -c 1
 
 # And should actually play
-ffplay "http://localhost:8730/hls/SOMELOGIN/master.m3u8?key=YOUR_KEY"
+ffplay "http://localhost:8730/stream/SOMELOGIN.ts?key=YOUR_KEY"
 ```
 
 In Jellyfin: **Live TV → Channels** should list your channels; **Guide** should show the current

@@ -13,7 +13,7 @@ from app.models import Channel, EventLog, EventSubSubscription, StreamSession, V
 from app.schemas import ChannelCreate, ChannelOut, ChannelUpdate, VodOut
 from app.security import AdminUser
 from app.services import channels as channel_service
-from app.services import images, library, vods
+from app.services import images, library, tuner, vods
 from app.services.channels import ChannelError
 from app.services.settings_store import ResolvedSettings, get_settings
 from app.util import sanitize_filename, twitch_thumbnail, utcnow
@@ -26,10 +26,16 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 
 def _to_out(channel: Channel, settings: ResolvedSettings, counts: dict[str, int]) -> ChannelOut:
     cfg = get_config()
-    token = f"?key={settings.row.tuner_token}" if settings.row.tuner_token else ""
     return ChannelOut.build(
         channel,
-        stream_url=f"{settings.self_base_url}/hls/{channel.twitch_login}/master.m3u8{token}",
+        # The same url the M3U gives Jellyfin, so the dashboard never shows a
+        # path that Jellyfin is not actually playing.
+        stream_url=tuner.stream_url(
+            settings.self_base_url,
+            channel,
+            settings.row.tuner_token,
+            settings.row.live_delivery,
+        ),
         library_path=str(library.series_path(cfg.media_root, channel)),
         vod_counts=counts,
     )

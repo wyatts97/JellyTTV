@@ -213,7 +213,7 @@ async def test_add_channel_then_see_it_everywhere(client: httpx.AsyncClient):
     assert channel["live_viewers"] == 175
     # Thumbnail placeholders are expanded, not passed through raw.
     assert "%{width}" not in (channel["live_thumbnail_url"] or "")
-    assert channel["stream_url"].endswith(f"/hls/twitchdev/master.m3u8?key={token}")
+    assert channel["stream_url"].endswith(f"/stream/twitchdev.ts?key={token}")
 
     listed = await client.get("/api/channels")
     assert listed.status_code == 200
@@ -221,7 +221,7 @@ async def test_add_channel_then_see_it_everywhere(client: httpx.AsyncClient):
 
     playlist = (await client.get(f"/tuner/playlist.m3u?key={token}")).text
     assert 'tvg-id="twitch.twitchdev"' in playlist
-    assert f"/hls/twitchdev/master.m3u8?key={token}" in playlist
+    assert f"/stream/twitchdev.ts?key={token}" in playlist
 
     guide = (await client.get(f"/tuner/guide.xml?key={token}")).text
     assert '<channel id="twitch.twitchdev">' in guide

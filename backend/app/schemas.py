@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Channel, SeasonScheme, Settings, Vod, VodMode, VodState
 from app.services.resolver import PLAYER_TYPES, resolve_player_type
+from app.services.tuner import LIVE_DELIVERIES, resolve_live_delivery
 
 
 class LoginRequest(BaseModel):
@@ -52,6 +53,7 @@ class SettingsUpdate(BaseModel):
     strip_ads: bool | None = None
     proxy_segments: bool | None = None
     ad_free_source: bool | None = None
+    live_delivery: Literal[LIVE_DELIVERIES] | None = None  # type: ignore[valid-type]
     # Constrained, because a typo here silently reverts you to the ad-bearing
     # path: Twitch treats an unrecognised playerType as its default.
     twitch_player_type: Literal[PLAYER_TYPES] | None = None  # type: ignore[valid-type]
@@ -94,6 +96,7 @@ class SettingsOut(BaseModel):
     strip_ads: bool
     proxy_segments: bool
     ad_free_source: bool
+    live_delivery: str
     twitch_player_type: str
     ad_spoofing: bool
     default_quality: str
@@ -287,6 +290,7 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         strip_ads=row.strip_ads,
         proxy_segments=row.proxy_segments,
         ad_free_source=row.ad_free_source,
+        live_delivery=resolve_live_delivery(row.live_delivery),
         # Coerced, not passed through: the additive migration adds this column
         # without a DEFAULT, so rows predating it read back NULL and a bare
         # pass-through would fail response validation on a non-optional str.

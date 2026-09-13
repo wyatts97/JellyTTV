@@ -71,8 +71,8 @@ Twitch Helix + EventSub
           │
           ▼
 ┌──────────────────────────────┐
-│           api                │  FastAPI: dashboard, tuner, HLS proxy, webhooks
-│  /api  /tuner  /hls  /vod    │
+│           api                │  FastAPI: dashboard, tuner, live stream, webhooks
+│  /api  /tuner  /stream  /vod │
 └───┬──────────┬───────────┬───┘
     │          │           │
  SQLite    Redis+arq    writes .strm/.nfo/artwork
@@ -84,7 +84,7 @@ Twitch Helix + EventSub
 
 Jellyfin ──M3U──►  /tuner/playlist.m3u     dynamic, live status per channel
 Jellyfin ──XMLTV─► /tuner/guide.xml        now/next programme data
-Jellyfin ──play──► /hls/{login}/master.m3u8 → ads stripped → segments redirected to Twitch CDN
+Jellyfin ──play──► /stream/{login}.ts        → one continuous MPEG-TS stream from streamlink
 Jellyfin ──play──► /vod/{video_id}         → 302 to a freshly resolved VOD url
 ```
 

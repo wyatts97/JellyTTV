@@ -41,7 +41,7 @@ def test_m3u_contains_matching_tvg_ids_and_stream_urls():
     assert 'tvg-id="twitch.alpha"' in playlist
     assert 'tvg-logo="https://cdn.example/alpha.png"' in playlist
     assert 'group-title="Twitch"' in playlist
-    assert "http://jellyttv:8730/hls/alpha/master.m3u8?key=tok123" in playlist
+    assert "http://jellyttv:8730/stream/alpha.ts?key=tok123" in playlist
     # Offline channels are retained by default so Jellyfin channel ids stay stable.
     assert 'tvg-id="twitch.beta"' in playlist
 
@@ -69,8 +69,45 @@ def test_m3u_skips_disabled_channels():
 
 def test_m3u_omits_key_when_no_token():
     playlist = build_m3u([_channel("alpha", live=True)], base_url="http://x:1", token=None)
-    assert "master.m3u8" in playlist
+    assert "/stream/alpha.ts" in playlist
     assert "?key=" not in playlist
+
+
+def test_live_channels_are_delivered_as_mpeg_ts_by_default():
+    """The `.ts` suffix is what makes Jellyfin treat the url as MPEG-TS."""
+    playlist = build_m3u([_channel("alpha", live=True)], base_url="http://x:1", token="t")
+    assert "http://x:1/stream/alpha.ts?key=t" in playlist
+    assert "master.m3u8" not in playlist
+
+
+def test_the_legacy_hls_path_is_still_reachable_as_a_rollback():
+    playlist = build_m3u(
+        [_channel("alpha", live=True)], base_url="http://x:1", token="t", live_delivery="hls"
+    )
+    assert "http://x:1/hls/alpha/master.m3u8?key=t" in playlist
+    assert "/stream/" not in playlist
+
+
+def test_an_unrecognised_delivery_value_falls_back_to_mpeg_ts():
+    playlist = build_m3u(
+        [_channel("alpha", live=True)], base_url="http://x:1", token=None, live_delivery="bogus"
+    )
+    assert "/stream/alpha.ts" in playlist
+
+
+def test_switching_delivery_keeps_every_channel_id():
+    """Jellyfin derives the channel id from `tvg-id`, falling back to a hash of
+    the url only when `tvg-id` is missing. So the url may change freely - but
+    only as long as the identity lines are byte-for-byte the same.
+    """
+    channels = [_channel("alpha", live=True), _channel("beta", live=False)]
+
+    def identity_lines(delivery: str) -> list[str]:
+        text = build_m3u(channels, base_url="http://x:1", token="t", live_delivery=delivery)
+        return [line for line in text.splitlines() if line.startswith("#EXTINF")]
+
+    assert identity_lines("ts") == identity_lines("hls")
+    assert all('tvg-id="' in line for line in identity_lines("ts"))
 
 
 def test_xmltv_channel_ids_match_the_playlist():

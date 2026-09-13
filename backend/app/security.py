@@ -74,6 +74,16 @@ async def require_tuner_token(
     key: Annotated[str | None, Query(description="Tuner access token")] = None,
 ) -> None:
     """Guard the endpoints Jellyfin (not a browser) calls."""
+    await check_tuner_token(session, request, key)
+
+
+async def check_tuner_token(session: AsyncSession, request: Request, key: str | None) -> None:
+    """The tuner-key check, callable with a session the caller controls.
+
+    `require_tuner_token` is the dependency form. This exists for the live TS
+    stream, which must not keep a request-scoped DB session open for the hours a
+    stream can run.
+    """
     row = await get_settings_row(session)
     expected = row.tuner_token
     if not expected:

@@ -163,6 +163,37 @@ async def binary_versions() -> dict[str, str | None]:
     return versions
 
 
+def _twitch_args(
+    user_token: str | None,
+    player_type: str | None,
+    device_id: str | None,
+) -> list[str]:
+    """The Twitch-specific streamlink arguments shared by every invocation."""
+    args: list[str] = []
+    # This install's device id, on both header spellings Twitch accepts. It used
+    # to be the literal `twitch-web-wall-mason`, which every ad-block script
+    # publishes and every JellyTTV install therefore shared - a single string
+    # Twitch could match on, describing thousands of viewers as one. A stable
+    # per-install id is the opposite trade: it says "one returning viewer", and
+    # it says the same thing to the ad-event report (services.ad_events), which
+    # has to agree with this or the two describe different people.
+    if device_id:
+        args += [
+            "--http-header",
+            f"X-Device-Id={device_id}",
+            "--http-header",
+            f"Device-ID={device_id}",
+        ]
+    resolved_player_type = resolve_player_type(player_type)
+    if resolved_player_type != PLAYER_TYPE_NONE:
+        # Undocumented Twitch behaviour, hence configurable rather than
+        # hard-coded. Off by default - see the comment on PLAYER_TYPE_NONE.
+        args += ["--twitch-access-token-param", f"playerType={resolved_player_type}"]
+    if user_token:
+        args += ["--twitch-api-header", f"Authorization=OAuth {user_token}"]
+    return args
+
+
 def _streamlink_cmd(
     url: str,
     quality: str,
@@ -173,34 +204,54 @@ def _streamlink_cmd(
     # No `--twitch-low-latency` here: it only changes streamlink's own buffering
     # and prefetch behaviour during playback, and `--stream-url` makes streamlink
     # print a url and exit. It never affected the playlist we were handed.
-    cmd = [
+    return [
         STREAMLINK_BIN,
         "--stream-url",
         "--quiet",
+        *_twitch_args(user_token, player_type, device_id),
+        url,
+        quality or "best",
     ]
-    # This install's device id, on both header spellings Twitch accepts. It used
-    # to be the literal `twitch-web-wall-mason`, which every ad-block script
-    # publishes and every JellyTTV install therefore shared - a single string
-    # Twitch could match on, describing thousands of viewers as one. A stable
-    # per-install id is the opposite trade: it says "one returning viewer", and
-    # it says the same thing to the ad-event report (services.ad_events), which
-    # has to agree with this or the two describe different people.
-    if device_id:
-        cmd += [
-            "--http-header",
-            f"X-Device-Id={device_id}",
-            "--http-header",
-            f"Device-ID={device_id}",
-        ]
-    resolved_player_type = resolve_player_type(player_type)
-    if resolved_player_type != PLAYER_TYPE_NONE:
-        # Undocumented Twitch behaviour, hence configurable rather than
-        # hard-coded. Off by default - see the comment on PLAYER_TYPE_NONE.
-        cmd += ["--twitch-access-token-param", f"playerType={resolved_player_type}"]
-    if user_token:
-        cmd += ["--twitch-api-header", f"Authorization=OAuth {user_token}"]
-    cmd += [url, quality or "best"]
-    return cmd
+
+
+def streamlink_stdout_cmd(
+    url: str,
+    quality: str,
+    user_token: str | None,
+    player_type: str | None = None,
+    device_id: str | None = None,
+) -> list[str]:
+    """streamlink as the live ingest: the stream itself, as MPEG-TS on stdout.
+
+    This replaces resolving a playlist url and rewriting it ourselves. streamlink
+    runs its own HLS client - playlist reloads, segment retries, weaver
+    reassignment - and writes one continuous TS byte stream, so there is no
+    playlist window, no media sequence and no manifest left for Jellyfin's
+    ffmpeg to trip over. Logging goes to stderr, keeping stdout pure TS.
+    """
+    cfg = get_config()
+    return [
+        STREAMLINK_BIN,
+        "--stdout",
+        "--loglevel",
+        "info",
+        # No `--twitch-disable-ads`: streamlink 8 marks it disabled and slated
+        # for removal, and once removed an unknown argument would stop every
+        # stream from starting. The ad-free player type carries no ads anyway.
+        "--stream-segment-attempts",
+        str(cfg.live_segment_attempts),
+        "--stream-segment-timeout",
+        str(cfg.live_segment_timeout_seconds),
+        "--stream-timeout",
+        str(cfg.live_stream_timeout_seconds),
+        "--hls-live-edge",
+        str(cfg.live_hls_live_edge),
+        "--hls-playlist-reload-time",
+        cfg.live_playlist_reload_time,
+        *_twitch_args(user_token, player_type, device_id),
+        url,
+        quality or "best",
+    ]
 
 
 def _ytdlp_cmd(url: str, quality: str) -> list[str]:
@@ -217,7 +268,7 @@ _OFFLINE_MARKERS = (
 )
 
 
-def _looks_offline(text: str) -> bool:
+def looks_offline(text: str) -> bool:
     lowered = text.lower()
     return any(marker.lower() in lowered for marker in _OFFLINE_MARKERS)
 
@@ -240,7 +291,7 @@ async def _resolve(
         if code == 0 and out.startswith("http"):
             return out.splitlines()[0].strip()
         combined = f"{err}\n{out}".strip()
-        if _looks_offline(combined):
+        if looks_offline(combined):
             raise ChannelOffline("channel is offline")
         errors.append(f"streamlink: {combined[:300] or f'exit {code}'}")
     else:
@@ -251,7 +302,7 @@ async def _resolve(
         if code == 0 and out.startswith("http"):
             return out.splitlines()[0].strip()
         combined = f"{err}\n{out}".strip()
-        if _looks_offline(combined):
+        if looks_offline(combined):
             raise ChannelOffline("channel is offline")
         errors.append(f"yt-dlp: {combined[:300] or f'exit {code}'}")
     else:

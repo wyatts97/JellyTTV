@@ -43,6 +43,7 @@ async def write_settings(
         before.row.strip_ads,
         before.row.default_quality,
     )
+    previous_live_url_shape = (before.row.live_delivery, before.row.ad_free_source)
 
     values = payload.model_dump(exclude_unset=True)
     # `eventsub_enabled` and empty-string clears must survive the None filter in
@@ -85,6 +86,16 @@ async def write_settings(
             "stream settings changed; dropped resolver cache and sessions",
             player_type=settings.row.twitch_player_type,
         )
+
+    # Jellyfin keeps each tuner channel's url in memory and only re-reads the
+    # M3U when channels are reloaded, so a delivery change would not take effect
+    # until the next scheduled refresh. Ask for one now.
+    if previous_live_url_shape != (settings.row.live_delivery, settings.row.ad_free_source):
+        await enqueue(
+            "jellyfin_refresh_guide",
+            job_id=coalesced_job_id("jellyfin_refresh_guide", window=30),
+        )
+        log.info("live delivery changed; refreshing jellyfin guide", delivery=settings.row.live_delivery)
 
     # Base url or token changes invalidate every .strm file we wrote.
     if {"self_base_url", "public_base_url"} & values.keys():
