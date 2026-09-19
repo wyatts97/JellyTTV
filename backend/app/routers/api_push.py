@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_db
@@ -68,13 +68,16 @@ async def subscribe(
     return _to_out(row)
 
 
-@router.delete("/subscriptions", status_code=204)
+@router.delete("/subscriptions", status_code=204, response_class=Response)
 async def unsubscribe(
     payload: PushUnsubscribeRequest,
     _user: AdminUser,
     session: Annotated[AsyncSession, Depends(get_db)],
-) -> None:
+) -> Response:
+    # An explicit Response, as in api_channels: under postponed annotations the
+    # pinned FastAPI reads `-> None` as a body and refuses the 204 at import.
     await webpush.unsubscribe(session, endpoint=payload.endpoint, sub_id=payload.id)
+    return Response(status_code=204)
 
 
 @router.post("/test", response_model=ConnectionTest)
