@@ -45,6 +45,8 @@ export function useEventStream(enabled: boolean) {
           case 'channels.changed':
             queryClient.invalidateQueries({ queryKey: ['channels'] })
             queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+            // The watch page starts playback by itself when its channel goes live.
+            queryClient.invalidateQueries({ queryKey: ['watch'] })
             break
           case 'vods.synced':
           case 'vod.progress':

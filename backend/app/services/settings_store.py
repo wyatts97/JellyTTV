@@ -9,6 +9,7 @@ from app.config import get_config
 from app.crypto import (
     decrypt,
     encrypt,
+    generate_vapid_keypair,
     random_device_id,
     random_eventsub_secret,
     random_token,
@@ -49,6 +50,21 @@ class ResolvedSettings:
     @property
     def eventsub_secret(self) -> str | None:
         return decrypt(self.row.eventsub_secret_enc)
+
+    @property
+    def vapid_private_key(self) -> str | None:
+        return decrypt(self.row.vapid_private_key_enc)
+
+    @property
+    def vapid_subject(self) -> str:
+        """The `sub` claim push services use to contact the sender.
+
+        Must be a `mailto:` or an https url - Apple's push service rejects
+        anything else - so the public url is used when there is one.
+        """
+        if self.public_base_url.startswith("https://"):
+            return self.public_base_url
+        return "mailto:jellyttv@users.noreply.github.com"
 
     @property
     def public_base_url(self) -> str:
@@ -114,6 +130,14 @@ async def get_settings_row(session: AsyncSession) -> Settings:
         row.twitch_device_id = random_device_id()
         session.add(row)
         await session.commit()
+    if not row.vapid_public_key or not row.vapid_private_key_enc:
+        # Generated once and then kept: rotating it would silently orphan every
+        # device already subscribed with the old public key.
+        public, private = generate_vapid_keypair()
+        row.vapid_public_key = public
+        row.vapid_private_key_enc = encrypt(private)
+        session.add(row)
+        await session.commit()
     return row
 
 
@@ -130,7 +154,13 @@ async def update_settings(session: AsyncSession, values: dict) -> Settings:
             # Empty string means "clear it", any other value replaces it.
             setattr(row, SECRET_FIELDS[key], encrypt(value) if value != "" else None)
             continue
-        if key in {"id", "created_at", "admin_password_hash"}:
+        if key in {
+            "id",
+            "created_at",
+            "admin_password_hash",
+            "vapid_public_key",
+            "vapid_private_key_enc",
+        }:
             continue
         if hasattr(row, key):
             setattr(row, key, value)

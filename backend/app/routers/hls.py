@@ -16,6 +16,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -60,6 +61,36 @@ ALLOWED_UPSTREAM_SUFFIXES = (
     ".akamaized.net",
     ".hls.ttvnw.net",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackPolicy:
+    """How one kind of client is served a live channel.
+
+    Jellyfin's policy comes straight from settings (`policy_from_settings`). The
+    built-in web player builds its own, because a browser player absorbs what
+    ffmpeg cannot - a mid-stream resolution change, a discontinuity - and so can
+    afford full quality with a short switch to the ad-free source during a break.
+    """
+
+    ad_free_source: bool
+    strip_ads: bool
+    proxy_segments: bool
+    # Whether a break nothing covers yet is held on our black segment. Off in
+    # ad-free mode: nothing should ever be black there (see `_session_playlist`).
+    hold: bool
+    ad_spoofing: bool
+
+
+def policy_from_settings(settings: ResolvedSettings) -> PlaybackPolicy:
+    row = settings.row
+    return PlaybackPolicy(
+        ad_free_source=row.ad_free_source,
+        strip_ads=row.strip_ads,
+        proxy_segments=row.proxy_segments,
+        hold=not row.ad_free_source,
+        ad_spoofing=row.ad_spoofing,
+    )
 
 
 def encode_url(url: str) -> str:
@@ -120,15 +151,19 @@ async def _fetch_text(url: str) -> str:
 
 
 async def _channel_quality(
-    session: AsyncSession, settings: ResolvedSettings, login: str
+    session: AsyncSession,
+    settings: ResolvedSettings,
+    login: str,
+    policy: PlaybackPolicy | None = None,
 ) -> str:
     """Validate the channel is tracked and playable, returning its quality."""
+    policy = policy or policy_from_settings(settings)
     channel = await channel_service.get_channel_by_login(session, login)
     if channel is None:
         raise HTTPException(status_code=404, detail=f"channel {login} is not tracked")
     if not channel.enabled or not channel.live_enabled:
         raise HTTPException(status_code=409, detail=f"{channel.display_name} is disabled")
-    if settings.row.ad_free_source:
+    if policy.ad_free_source:
         # `picture-by-picture` offers audio_only/160p/360p and nothing else, so
         # a channel pinned to 1080p60 would make streamlink fail on a rendition
         # that is simply not in this player type's master playlist. "best" asks
@@ -138,13 +173,19 @@ async def _channel_quality(
     return channel.quality or settings.row.default_quality or "best"
 
 
-def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
+def _make_resolver(
+    login: str,
+    quality: str,
+    settings: ResolvedSettings,
+    policy: PlaybackPolicy | None = None,
+):
     """Build the callable a stream session uses to (re)acquire an upstream url.
 
     Passed in rather than called up front so the session controls *when* a new
     weaver url is fetched: re-resolving mid-playback hands back a different host
     whose numbering does not line up with what the player already buffered.
     """
+    policy = policy or policy_from_settings(settings)
     calls = {"n": 0}
 
     async def resolve() -> str:
@@ -156,7 +197,7 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
                 user_token=settings.twitch_user_token,
                 player_type=(
                     resolver.AD_FREE_PLAYER_TYPE
-                    if settings.row.ad_free_source
+                    if policy.ad_free_source
                     else settings.row.twitch_player_type
                 ),
                 device_id=settings.twitch_device_id,
@@ -183,7 +224,9 @@ def _make_resolver(login: str, quality: str, settings: ResolvedSettings):
     return resolve
 
 
-def _make_backup_finder(login: str, settings: ResolvedSettings):
+def _make_backup_finder(
+    login: str, settings: ResolvedSettings, policy: PlaybackPolicy | None = None
+):
     """Build the backup search, or None when ad handling is switched off.
 
     `strip_ads` is the single switch now. There used to be three selectable
@@ -192,7 +235,8 @@ def _make_backup_finder(login: str, settings: ResolvedSettings):
     without notice) and a strip-only mode that simply played the ad. Both are
     gone, so there is nothing left to branch on.
     """
-    if not settings.row.strip_ads or settings.row.ad_free_source:
+    policy = policy or policy_from_settings(settings)
+    if not policy.strip_ads or policy.ad_free_source:
         # In ad-free mode there is nothing to escape from, and the rotation has
         # nothing to offer anyway: every other player type is stitched at the
         # same moment the native stream is. Searching would only spend
@@ -227,9 +271,10 @@ def _make_hold_uri(base: str, login: str, key_suffix: str):
     return hold
 
 
-def _make_ad_reporter(settings: ResolvedSettings):
+def _make_ad_reporter(settings: ResolvedSettings, policy: PlaybackPolicy | None = None):
     """Build the ad-progress reporter, or None when spoofing is disabled."""
-    if not settings.row.ad_spoofing:
+    policy = policy or policy_from_settings(settings)
+    if not policy.ad_spoofing:
         return None
 
     async def report(playlist: str) -> int:
@@ -327,33 +372,40 @@ async def _session_playlist(
     key_suffix: str,
     resolve,
     variant: str | None = None,
+    policy: PlaybackPolicy | None = None,
+    rewrite_uri=None,
+    hold_uri=None,
 ) -> Response:
-    """Serve a media playlist through the stateful session."""
+    """Serve a media playlist through the stateful session.
+
+    `rewrite_uri` and `hold_uri` default to the Jellyfin-facing `/hls` urls; the
+    web player passes its own so every url it is handed is one it can reach.
+    """
+    policy = policy or policy_from_settings(settings)
+    if rewrite_uri is None:
+        rewrite_uri = _segment_rewriter(base, login, key_suffix, policy.proxy_segments)
+    if hold_uri is None and policy.hold:
+        hold_uri = _make_hold_uri(base, login, key_suffix)
     try:
         render = await asyncio.wait_for(
             stream_session.get_playlist(
                 login=login,
                 quality=quality,
-                strip_ads=settings.row.strip_ads,
+                strip_ads=policy.strip_ads,
                 resolve=resolve,
                 fetch=_fetch_playlist,
-                rewrite_uri=_segment_rewriter(
-                    base, login, key_suffix, settings.row.proxy_segments
-                ),
+                rewrite_uri=rewrite_uri,
                 variant=variant,
-                backup=_make_backup_finder(login, settings),
-                report_ads=_make_ad_reporter(settings),
+                backup=_make_backup_finder(login, settings, policy),
+                report_ads=_make_ad_reporter(settings, policy),
                 # No hold in ad-free mode. The hold is a black segment, and
                 # the whole point of this mode is that nothing should ever be
                 # black. If an ad ever does turn up on this player type, the
                 # session passes it through instead - an ad keeps the timeline
                 # moving, where an unbounded hold is the dead channel we are
                 # trying to eliminate.
-                hold_uri=(
-                    None
-                    if settings.row.ad_free_source
-                    else _make_hold_uri(base, login, key_suffix)
-                ),
+                # (`policy.hold` is off in that mode, so `hold_uri` is None.)
+                hold_uri=hold_uri,
             ),
             timeout=PLAYLIST_DEADLINE_SECONDS,
         )
@@ -450,7 +502,11 @@ async def segment(
 
     # A client pulling segments is alive even if a playlist poll runs late.
     stream_session.touch_any(login)
+    return await proxy_segment(url)
 
+
+async def proxy_segment(url: str) -> Response:
+    """Stream one upstream segment through us. `url` must already be validated."""
     client = shared_http.get_client()
     try:
         upstream_request = client.build_request(
@@ -483,6 +539,10 @@ async def segment(
 
 @router.api_route("/hls/{login}/hold", methods=["GET", "HEAD"], include_in_schema=False)
 async def hold_segment(login: str, request: Request) -> Response:
+    return serve_hold(login)
+
+
+def serve_hold(login: str) -> Response:
     """Serve the hold segment: one black, silent, decodable second of our own.
 
     Handed out during an ad break that no clean backup has covered yet. It is a

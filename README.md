@@ -4,13 +4,22 @@
   <img src="backend/app/icons/icon-512.png" width="128" height="128" alt="JellyTTV" />
 </p>
 
-Self-hosted bridge that makes Twitch channels appear inside Jellyfin — live streams as **Live TV
-channels** (with a real EPG), and past broadcasts as **episodes** of a per-channel series.
+Self-hosted Twitch companion: watch your channels ad-free in its own web app, get go-live push
+notifications, and bridge everything into Jellyfin — live streams as **Live TV channels** (with a
+real EPG), and past broadcasts as **episodes** of a per-channel series.
 
+- **Built-in player** — watch any tracked channel right in the dashboard (**Watch** in the menu,
+  or click a live card). The browser player handles what Jellyfin's ffmpeg can't, so it plays at
+  **full quality** and only switches to Twitch's never-ad-stitched 360p source for the length of an
+  ad break, then switches back. You can also lock it to *360p ad-free* from the player. It includes
+  Twitch chat, picture-in-picture, keyboard shortcuts, and automatic recovery from stalls.
+- **Installable app with go-live alerts** — JellyTTV is a PWA. Install it to your phone or
+  desktop, turn on notifications, and it pushes to every subscribed device when a channel goes
+  live; tapping the notification opens the stream. No Jellyfin client or plugin needed.
 - **Live TV** — JellyTTV serves a dynamic M3U playlist and XMLTV guide. Point Jellyfin's *M3U
   Tuner* at it and every tracked channel becomes a Live TV channel showing the current title,
   category and viewer count in the guide.
-- **No ads, no interruptions** — every channel is served from `picture-by-picture`, the one Twitch
+- **No ads in Jellyfin either** — every Jellyfin channel is served from `picture-by-picture`, the one Twitch
   player type that is never ad-stitched, so a break is simply not there: no ad, no black screen,
   no frozen picture. That player type tops out at **360p**, which is the deliberate trade. Turn
   *Always use the ad-free source* off to watch at full quality and have breaks covered by
@@ -20,8 +29,7 @@ channels** (with a real EPG), and past broadcasts as **episodes** of a per-chann
   between zero-storage `.strm` links or full yt-dlp archiving with retention rules.
 - **Instant go-live** — Twitch EventSub webhooks when you have public HTTPS, automatic polling
   fallback when you don't.
-- **Go-live push notifications** — optional push to your phone or tablet when a tracked channel
-  starts streaming, delivered through the
+- **Streamyfin notifications (optional)** — go-live pushes can also go through the
   [Streamyfin companion plugin](https://github.com/streamyfin/jellyfin-plugin-streamyfin) using the
   Jellyfin API key you already configured. (Jellyfin's own web app cannot receive push notifications
   — its service worker only does offline caching — so a client that supports them is required.) The
@@ -54,12 +62,12 @@ You will need:
 
 | Requirement | Where to get it |
 |---|---|
-| Jellyfin **12.0 or newer** | [jellyfin.org/downloads](https://jellyfin.org/downloads) — 10.11 and earlier are not supported |
+| Jellyfin **12.0 or newer** (optional) | Only for Live TV and the VOD library — the built-in player needs no Jellyfin. [jellyfin.org/downloads](https://jellyfin.org/downloads); 10.11 and earlier are not supported |
 | Twitch Client ID + Secret | [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) — client type **Confidential** |
 | Jellyfin API key (optional) | Jellyfin → Dashboard → API Keys |
-| Public HTTPS URL (optional) | Only for EventSub webhooks; see [reverse proxy](docs/reverse-proxy.md) |
+| Public HTTPS URL (optional) | For EventSub webhooks and for push notifications (browsers only allow Web Push over HTTPS). The bundled Caddy profile provides one |
 
-Then read **[docs/jellyfin-setup.md](docs/jellyfin-setup.md)** — there are three Jellyfin settings
+Using Jellyfin? Then read **[docs/jellyfin-setup.md](docs/jellyfin-setup.md)** — there are three Jellyfin settings
 that must be right or your library will look wrong.
 
 ---
@@ -109,6 +117,36 @@ Episode numbers are deterministic — season is the broadcast year, episode is
 `day_of_year × 10 + index_within_day` — so they sort chronologically and never get renumbered.
 
 ---
+
+## Watching in the browser
+
+Open **Watch** in the sidebar, or click any live card on the Dashboard. The player gets its
+playlist from JellyTTV, which runs the same ad-detection and backup-source engine as the legacy
+Jellyfin HLS path. The browser fetches the video itself straight from Twitch's CDN, so watching
+costs your server almost no bandwidth. Turn on *Settings → Built-in player → Stream video through
+JellyTTV* only if the viewing device can't reach Twitch.
+
+| Player source | What you get |
+|---|---|
+| **Best** (default) | The channel's full quality. During an ad break the player switches to a clean copy of the stream, bridged first by Twitch's never-stitched 360p `picture-by-picture` source, then returns to full quality when the break ends. A green *Ad break blocked* badge shows while this is happening. |
+| **360p ad-free** | `picture-by-picture` from the start. Capped at 360p, with nothing to switch. |
+
+Shortcuts: <kbd>Space</kbd>/<kbd>K</kbd> play/pause, <kbd>M</kbd> mute, <kbd>F</kbd> fullscreen,
+<kbd>L</kbd> jump to live. Chat is Twitch's own embed; sign in to twitch.tv in the same browser to
+send messages.
+
+### Install the app and get go-live notifications
+
+1. Open JellyTTV over **HTTPS** (for example with `docker compose --profile with-caddy up -d`).
+   Browsers refuse Web Push on plain `http://`, except on `localhost`.
+2. Install it: *Install app* in Settings, or the browser's install button. On **iPhone/iPad**,
+   tap *Share → Add to Home Screen*, then open JellyTTV from the home screen, because iOS only
+   allows push inside an installed app.
+3. *Settings → Go-live notifications → Enable notifications*, once on each device. *Send test*
+   confirms delivery. Mute individual channels with the bell on the Channels page.
+
+Notifications are sent by JellyTTV itself (standard Web Push with a key generated for your
+install). They don't depend on Jellyfin, and the optional Streamyfin route runs independently.
 
 ## Configuration
 

@@ -18,6 +18,7 @@ import {
   CardHeader,
   EmptyState,
   LiveBadge,
+  PlayOverlay,
   Progress,
   Spinner,
 } from '@/components/ui'
@@ -80,7 +81,7 @@ export default function Dashboard() {
       <Card>
         <CardHeader
           title="Live channels"
-          description="Streams currently playable through the Jellyfin Live TV tuner."
+          description="Click a stream to watch it here, or play it through Jellyfin's Live TV tuner."
           action={
             <Badge tone={data.eventsub.mode === 'webhook' ? 'success' : 'info'}>
               <Zap className="size-3" aria-hidden />
@@ -219,18 +220,24 @@ function Stat({
 
 function LiveCard({ channel }: { channel: LiveChannel }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-ink-700/70 bg-ink-850">
+    <Link
+      to={`/watch/${channel.login}`}
+      className="group overflow-hidden rounded-lg border border-ink-700/70 bg-ink-850 transition-colors hover:border-twitch-500/60"
+    >
       {/*
         thumbnail_url and avatar_url are always non-null proxy paths, and the
         backend serves its own placeholder artwork when Twitch's CDN fails - so
         there is no "missing url" branch to render here.
       */}
-      <img
-        src={channel.thumbnail_url}
-        alt=""
-        className="aspect-video w-full bg-ink-800 object-cover"
-        loading="lazy"
-      />
+      <div className="relative">
+        <img
+          src={channel.thumbnail_url}
+          alt=""
+          className="aspect-video w-full bg-ink-800 object-cover"
+          loading="lazy"
+        />
+        <PlayOverlay />
+      </div>
       <div className="space-y-2 p-3.5">
         <div className="flex items-center gap-2">
           <img
@@ -254,6 +261,6 @@ function LiveCard({ channel }: { channel: LiveChannel }) {
           <span>{formatUptime(channel.started_at)}</span>
         </div>
       </div>
-    </div>
+    </Link>
   )
 }

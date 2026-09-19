@@ -1,8 +1,12 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Archive,
+  Bell,
+  BellOff,
   FolderTree,
+  MonitorPlay,
   Link2,
   Plus,
   RefreshCw,
@@ -59,6 +63,19 @@ export default function Channels() {
     onError: (error: ApiError) => toast.error(error.message),
   })
 
+  const mute = useMutation({
+    mutationFn: ({ id, notify }: { id: number; notify: boolean }) =>
+      api.updateChannel(id, { notify_enabled: notify }),
+    onSuccess: (channel) =>
+      toast.success(
+        channel.notify_enabled
+          ? `Go-live notifications on for ${channel.display_name}`
+          : `${channel.display_name} muted`,
+      ),
+    onError: (error: ApiError) => toast.error(error.message),
+    onSettled: invalidate,
+  })
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -99,6 +116,7 @@ export default function Channels() {
               onEdit={() => setEditing(channel)}
               onSync={() => sync.mutate(channel.id)}
               onPublish={() => publish.mutate(channel.id)}
+              onToggleNotify={() => mute.mutate({ id: channel.id, notify: !channel.notify_enabled })}
               busy={sync.isPending || publish.isPending}
             />
           ))}
@@ -123,12 +141,14 @@ function ChannelCard({
   onEdit,
   onSync,
   onPublish,
+  onToggleNotify,
   busy,
 }: {
   channel: Channel
   onEdit: () => void
   onSync: () => void
   onPublish: () => void
+  onToggleNotify: () => void
   busy: boolean
 }) {
   const counts = channel.vod_counts
@@ -160,6 +180,19 @@ function ChannelCard({
               twitch.tv/{channel.twitch_login} · {channel.tvg_id}
             </p>
           </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onToggleNotify}
+            aria-label={channel.notify_enabled ? 'Mute go-live notifications' : 'Unmute go-live notifications'}
+            title={channel.notify_enabled ? 'Go-live notifications on' : 'Go-live notifications muted'}
+          >
+            {channel.notify_enabled ? (
+              <Bell className="size-4 text-twitch-400" />
+            ) : (
+              <BellOff className="size-4" />
+            )}
+          </Button>
         </div>
 
         {channel.is_live && (
@@ -216,6 +249,14 @@ function ChannelCard({
         )}
 
         <div className="flex flex-wrap gap-2">
+          {channel.is_live && channel.enabled && channel.live_enabled && (
+            <Link
+              to={`/watch/${channel.twitch_login}`}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-twitch-600 px-3 text-xs font-medium text-white hover:bg-twitch-500"
+            >
+              <MonitorPlay className="size-3.5" /> Watch
+            </Link>
+          )}
           <Button size="sm" variant="outline" onClick={onSync} disabled={busy}>
             <RefreshCw className="size-3.5" /> Sync VODs
           </Button>

@@ -397,3 +397,17 @@ export function CopyRow({ label, value }: { label: string; value: string }) {
     </div>
   )
 }
+
+/* ------------------------------------------------------------ PlayOverlay */
+/** Hover affordance for a thumbnail that opens the player. Parent needs `group relative`. */
+export function PlayOverlay() {
+  return (
+    <div className="absolute inset-0 grid place-items-center bg-black/0 transition-colors group-hover:bg-black/35">
+      <span className="grid size-12 place-items-center rounded-full bg-twitch-600/90 text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+        <svg viewBox="0 0 24 24" className="ml-0.5 size-5 fill-current" aria-hidden>
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      </span>
+    </div>
+  )
+}

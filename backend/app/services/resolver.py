@@ -99,15 +99,15 @@ class _Entry:
 
 
 _cache: dict[str, _Entry] = {}
-_locks: dict[str, asyncio.Lock] = {}
+# One resolve per key at a time, shared by everyone who asks for it meanwhile.
+_inflight: dict[str, asyncio.Task[str]] = {}
 
 
-def _lock_for(key: str) -> asyncio.Lock:
-    lock = _locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _locks[key] = lock
-    return lock
+def _retrieve(task: asyncio.Task) -> None:
+    # A resolve whose every waiter gave up still finishes; read its exception
+    # so asyncio does not log it as "never retrieved".
+    if not task.cancelled():
+        task.exception()
 
 
 def invalidate(key: str | None = None) -> None:
@@ -207,7 +207,10 @@ def _streamlink_cmd(
     return [
         STREAMLINK_BIN,
         "--stream-url",
-        "--quiet",
+        # Not `--quiet`: streamlink 8 treats that as "no output at all" and
+        # prints nothing, not even the url - which then fell through to yt-dlp.
+        "--loglevel",
+        "error",
         *_twitch_args(user_token, player_type, device_id),
         url,
         quality or "best",
@@ -297,6 +300,14 @@ async def _resolve(
     else:
         errors.append("streamlink: binary not found")
 
+    if resolve_player_type(player_type) != DEFAULT_PLAYER_TYPE:
+        # yt-dlp cannot ask for a player type, so its answer is always the
+        # default, ad-stitched stream. Returning that for the ad-free source or
+        # an ad-break backup would silently hand back the very ads the request
+        # exists to avoid; failing lets the caller keep what it has.
+        errors.append("yt-dlp: skipped, it cannot request a player type")
+        raise ResolveError("; ".join(errors))
+
     if shutil.which(YTDLP_BIN):
         code, out, err = await _run(_ytdlp_cmd(url, quality), timeout=timeout)
         if code == 0 and out.startswith("http"):
@@ -328,16 +339,30 @@ async def _resolve_cached(
     if entry and entry.expires_at > now and not force:
         return entry.url
 
-    async with _lock_for(cache_key):
-        entry = _cache.get(cache_key)
-        now = time.time()
-        if entry and entry.expires_at > now and not force:
-            return entry.url
-        resolved = await _resolve(
-            url, quality, user_token, player_type, timeout, device_id
-        )
-        _cache[cache_key] = _Entry(url=resolved, expires_at=now + ttl)
-        return resolved
+    # The resolve runs as its own task and callers await it through a shield.
+    # Playlist requests wait on it under a short render deadline, and a streamlink
+    # cold start regularly outlasts that deadline: when the waiter's cancellation
+    # reached the subprocess, every retry started from scratch and a slow channel
+    # could never be resolved at all. Now the work survives the waiter, and the
+    # retry joins the resolve already in flight instead of starting another.
+    # (A request with `force` joins it too - an in-flight resolve is fresh.)
+    task = _inflight.get(cache_key)
+    if task is None:
+
+        async def work() -> str:
+            try:
+                resolved = await _resolve(
+                    url, quality, user_token, player_type, timeout, device_id
+                )
+                _cache[cache_key] = _Entry(url=resolved, expires_at=time.time() + ttl)
+                return resolved
+            finally:
+                _inflight.pop(cache_key, None)
+
+        task = asyncio.create_task(work())
+        task.add_done_callback(_retrieve)
+        _inflight[cache_key] = task
+    return await asyncio.shield(task)
 
 
 def live_cache_key(

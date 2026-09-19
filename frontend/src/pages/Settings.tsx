@@ -19,6 +19,7 @@ import {
   Toggle,
 } from '@/components/ui'
 import { formatBytes } from '@/lib/utils'
+import { PushDevices } from '@/components/PushDevices'
 
 type Draft = Record<string, unknown>
 
@@ -338,25 +339,35 @@ export default function Settings() {
       <Card>
         <CardHeader
           title="Go-live notifications"
-          description="Push a notification when a tracked channel starts streaming."
-          action={
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => testNotify.mutate()}
-              loading={testNotify.isPending}
-            >
-              <Bell className="size-3.5" /> Send test
-            </Button>
-          }
+          description="Push a notification to your devices when a tracked channel starts streaming. Mute individual channels with the bell on the Channels page."
         />
         <CardBody className="space-y-4">
           <Toggle
-            checked={Boolean(get('notify_on_live'))}
-            onChange={(v) => set('notify_on_live', v)}
-            label="Notify when a channel goes live"
-            description="Delivered through the Streamyfin companion plugin on your Jellyfin server. Jellyfin's own web app cannot receive push notifications."
+            checked={Boolean(get('webpush_enabled'))}
+            onChange={(v) => set('webpush_enabled', v)}
+            label="Send go-live notifications from JellyTTV"
+            description="Delivered by this app (install it to your home screen for the best experience). Tapping a notification opens the stream in the built-in player."
           />
+          <PushDevices />
+          <div className="flex items-start justify-between gap-4 border-t border-ink-700/70 pt-3">
+            <div className="min-w-0 flex-1">
+              <Toggle
+                checked={Boolean(get('notify_on_live'))}
+                onChange={(v) => set('notify_on_live', v)}
+                label="Also send through Jellyfin (Streamyfin plugin)"
+                description="For people who watch in a Streamyfin client. Needs the Streamyfin companion plugin on your Jellyfin server; independent of the notifications above."
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-2 shrink-0"
+              onClick={() => testNotify.mutate()}
+              loading={testNotify.isPending}
+            >
+              <Bell className="size-3.5" /> Test Jellyfin
+            </Button>
+          </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field
               label="Title"
@@ -379,9 +390,25 @@ export default function Settings() {
         </CardBody>
       </Card>
 
+      {/* ------------------------------------------------ Built-in player */}
+      <Card>
+        <CardHeader
+          title="Built-in player"
+          description="Watching in JellyTTV itself. Choose between full quality and the 360p ad-free source in the player."
+        />
+        <CardBody className="space-y-1">
+          <Toggle
+            checked={Boolean(get('web_proxy_segments'))}
+            onChange={(v) => set('web_proxy_segments', v)}
+            label="Stream video through JellyTTV"
+            description="Off (recommended) lets your browser fetch video straight from Twitch's CDN; JellyTTV only serves the ad-filtered playlist. Turn on only if the viewing device cannot reach Twitch directly. It routes every stream through this server's upload."
+          />
+        </CardBody>
+      </Card>
+
       {/* --------------------------------------------- Streaming behaviour */}
       <Card>
-        <CardHeader title="Streaming" description="How stream bytes get from Twitch to Jellyfin." />
+        <CardHeader title="Streaming (Jellyfin)" description="How stream bytes get from Twitch to Jellyfin." />
         <CardBody className="space-y-1">
           <div className="pb-3">
             <Field
@@ -426,10 +453,9 @@ export default function Settings() {
           />
           <Toggle
             checked={Boolean(get('ad_spoofing'))}
-            disabled={!legacyHls || Boolean(get('ad_free_source'))}
             onChange={(v) => set('ad_spoofing', v)}
             label="Report blocked ads as watched"
-            description="Legacy HLS only. Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."
+            description="Applies to the built-in player and legacy HLS. Sends Twitch the ad-progress signals its player would have sent, which is what reduces anti-adblock detection. It reports ads as watched that were not. Independent of blocking — turning it off changes nothing about which ads you see."
           />
           <Toggle
             checked={Boolean(get('proxy_segments'))}

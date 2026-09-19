@@ -70,11 +70,24 @@ class Settings(SQLModel, table=True):
     jellyfin_shows_library_id: str | None = None
     jellyfin_auto_refresh: bool = True
 
-    # Go-live push notifications, delivered via the Streamyfin companion plugin
-    # (Jellyfin's own web PWA cannot receive push at all).
+    # Go-live notifications via the Streamyfin companion plugin on Jellyfin
+    # (Jellyfin's own web PWA cannot receive push at all). Independent of Web
+    # Push below; the templates are shared by both.
     notify_on_live: bool = False
     notify_title_template: str = "{display_name} is live"
     notify_body_template: str = "{title}"
+
+    # Go-live Web Push, delivered by JellyTTV's own PWA to every subscribed
+    # device. The VAPID key pair is generated on first read (see
+    # settings_store.get_settings_row); the private half is encrypted at rest.
+    webpush_enabled: bool = True
+    vapid_public_key: str | None = None
+    vapid_private_key_enc: str | None = None
+
+    # Stream the built-in web player's segments through JellyTTV instead of
+    # letting the browser fetch them from Twitch's CDN directly. Costs upload
+    # bandwidth; only needed when the viewing device cannot reach Twitch.
+    web_proxy_segments: bool = False
 
     # Base url of THIS service as reachable from the Jellyfin server.
     # Used inside .strm files and for the M3U/XMLTV urls shown in the UI.
@@ -150,6 +163,8 @@ class Channel(SQLModel, table=True):
     live_enabled: bool = True
     vod_mode: VodMode = Field(default=VodMode.strm)
     quality: str = "best"
+    # Per-channel mute for go-live notifications, on every delivery channel.
+    notify_enabled: bool = True
 
     season_scheme: SeasonScheme = Field(default=SeasonScheme.year)
     series_dir: str
@@ -273,3 +288,19 @@ class EventLog(SQLModel, table=True):
     message: str = ""
     channel_id: int | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class PushSubscription(SQLModel, table=True):
+    """One browser/device subscribed to go-live Web Push."""
+
+    __tablename__ = "push_subscription"
+    __table_args__ = (UniqueConstraint("endpoint", name="uq_push_endpoint"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    endpoint: str = Field(index=True)
+    p256dh: str
+    auth: str
+    label: str | None = None
+    failure_count: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    last_success_at: datetime | None = None

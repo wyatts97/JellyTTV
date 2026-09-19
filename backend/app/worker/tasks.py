@@ -187,10 +187,12 @@ async def notify_live(ctx: dict[str, Any], channel_id: int) -> dict[str, Any]:
         channel = await session.get(Channel, channel_id)
         if channel is None or not channel.is_live:
             return {"sent": False, "reason": "not live"}
-        if not settings.row.notify_on_live:
+        if not settings.row.notify_on_live and not settings.row.webpush_enabled:
             return {"sent": False, "reason": "disabled"}
+        if not channel.notify_enabled:
+            return {"sent": False, "reason": "muted"}
         try:
-            sent = await notifications.notify_live(settings, channel)
+            sent = await notifications.notify_live(settings, channel, session)
         except notifications.NotificationError as exc:
             log.warning(
                 "go-live notification failed", login=channel.twitch_login, error=str(exc)

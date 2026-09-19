@@ -16,6 +16,7 @@ export default defineConfig({
       '/api': { target: backend, changeOrigin: true },
       '/tuner': { target: backend, changeOrigin: true },
       '/hls': { target: backend, changeOrigin: true },
+      '/stream': { target: backend, changeOrigin: true },
       '/vod': { target: backend, changeOrigin: true },
       '/eventsub': { target: backend, changeOrigin: true },
     },

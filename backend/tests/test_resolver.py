@@ -9,6 +9,9 @@ it is worth pinning down.
 
 from __future__ import annotations
 
+import pytest
+
+from app.services import resolver
 from app.services.resolver import (
     DEFAULT_PLAYER_TYPE,
     PLAYER_TYPE_NONE,
@@ -71,3 +74,69 @@ def test_cache_key_separates_player_types():
     assert live_cache_key("chan", "best", None) == live_cache_key(
         "chan", "best", DEFAULT_PLAYER_TYPE
     )
+
+
+async def test_a_resolve_survives_a_waiter_that_gave_up(monkeypatch):
+    """A playlist deadline cancelling its wait must not cancel the resolve.
+
+    streamlink's cold start regularly outlasts the render deadline; when the
+    cancellation reached the subprocess, every retry started over and a slow
+    channel never resolved at all. The retry must join the resolve in flight.
+    """
+    import asyncio
+
+    calls = {"n": 0}
+    release = asyncio.Event()
+
+    async def slow_resolve(*_args, **_kwargs):
+        calls["n"] += 1
+        await release.wait()
+        return "https://video-weaver.x.hls.ttvnw.net/v1/playlist/slow.m3u8"
+
+    resolver.invalidate()
+    monkeypatch.setattr(resolver, "_resolve", slow_resolve)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(resolver.resolve_live("slowpoke"), timeout=0.05)
+
+    retry = asyncio.create_task(resolver.resolve_live("slowpoke", force=True))
+    await asyncio.sleep(0)
+    release.set()
+    assert (await retry).endswith("slow.m3u8")
+    assert calls["n"] == 1, "the retry started a second resolve instead of joining"
+    # And the result was cached for the next caller.
+    assert (await resolver.resolve_live("slowpoke")).endswith("slow.m3u8")
+    assert calls["n"] == 1
+    resolver.invalidate()
+
+
+async def test_the_ad_free_source_never_falls_back_to_yt_dlp(monkeypatch):
+    """yt-dlp cannot request a player type, so its answer carries the ads.
+
+    Falling back to it for `picture-by-picture` quietly turned the ad-free
+    source into the ad-stitched native stream.
+    """
+    ran: list[str] = []
+
+    async def fake_run(cmd, *, timeout=0):
+        ran.append(cmd[0])
+        return 1, "", "error: some transient failure"
+
+    monkeypatch.setattr(resolver.shutil, "which", lambda _name: "/usr/bin/x")
+    monkeypatch.setattr(resolver, "_run", fake_run)
+
+    with pytest.raises(resolver.ResolveError):
+        await resolver._resolve(URL, "best", None, player_type=resolver.AD_FREE_PLAYER_TYPE)
+    assert ran == [resolver.STREAMLINK_BIN]
+
+    ran.clear()
+    with pytest.raises(resolver.ResolveError):
+        await resolver._resolve(URL, "best", None, player_type=None)
+    assert ran == [resolver.STREAMLINK_BIN, resolver.YTDLP_BIN]
+
+
+def test_streamlink_stream_url_is_not_silenced():
+    """`--quiet` makes streamlink 8 print nothing, not even the url."""
+    cmd = _streamlink_cmd(URL, "best", None)
+    assert "--quiet" not in cmd
+    assert cmd[cmd.index("--loglevel") + 1] == "error"

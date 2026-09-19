@@ -320,6 +320,33 @@ Turn **off** *Proxy video segments*. When off (the default), JellyTTV only rewri
 playlists and redirects the actual video to Twitch's CDN. When on, all video flows through the
 container.
 
+## Built-in player: "Lost connection" or it will not start
+
+- The first play of a channel waits for a streamlink resolve, which can take 5–15 s. The player
+  keeps retrying on its own. If it gives up, *Retry* starts it again.
+- Check that the viewing device can reach `*.ttvnw.net`. The browser fetches video directly from
+  Twitch's CDN. If that's blocked on your network, turn on *Settings → Built-in player → Stream
+  video through JellyTTV*.
+- A green *Ad break blocked — finding a clean source* badge that stays up for the whole break
+  means no clean copy was found for this channel. Switch the player to **360p ad-free**.
+
+## Chat does not load next to the player
+
+Twitch's chat embed must be told which site hosts it (`parent=`), and JellyTTV sends the
+hostname you opened it on. Twitch accepts `localhost` and real domain names, but may refuse a
+bare IP address. Open JellyTTV through its domain name.
+
+## Push notifications do not arrive
+
+- *Enable notifications* is greyed out: the page isn't on HTTPS, or (on iPhone/iPad) you're
+  in a Safari tab rather than the installed home-screen app. The card explains which.
+- "Notifications are blocked for this site": you declined the prompt earlier. Re-allow
+  notifications in the browser's site settings.
+- *Send test* reports failures: the device list shows a failure count. A device that the push
+  service reports as gone (uninstalled app, cleared site data) is removed automatically, and so
+  is one that fails 5 times in a row. Re-enable notifications on it.
+- Android may delay notifications for apps under battery optimisation. Exempt your browser.
+
 ## Reset
 
 ```bash

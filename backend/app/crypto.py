@@ -99,6 +99,30 @@ def random_device_id() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(32))
 
 
+def generate_vapid_keypair() -> tuple[str, str]:
+    """A P-256 key pair for Web Push, as (public, private) base64url strings.
+
+    The public key is the 65-byte uncompressed point browsers expect as
+    `applicationServerKey`; the private key is the raw 32-byte scalar, which is
+    one of the forms pywebpush accepts directly.
+    """
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    public = key.public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
+    )
+    private = key.private_numbers().private_value.to_bytes(32, "big")
+
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return b64(public), b64(private)
+
+
 def reset_cipher_cache() -> None:
     """Test helper."""
     global _fernet

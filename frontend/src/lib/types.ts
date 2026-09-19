@@ -34,6 +34,8 @@ export interface Settings {
   notify_on_live: boolean
   notify_title_template: string
   notify_body_template: string
+  webpush_enabled: boolean
+  web_proxy_segments: boolean
   tuner_token: string | null
   tuner_include_offline: boolean
   proxy_enabled: boolean
@@ -62,6 +64,7 @@ export interface Channel {
   offline_image_url: string | null
   enabled: boolean
   live_enabled: boolean
+  notify_enabled: boolean
   vod_mode: VodMode
   quality: string
   season_scheme: SeasonScheme
@@ -191,4 +194,41 @@ export interface AppEvent {
   type: string
   at: string
   data: Record<string, unknown>
+}
+
+export type WatchMode = 'bridged' | 'adfree'
+
+export interface WatchInfo {
+  id: number
+  login: string
+  display_name: string
+  playable: boolean
+  is_live: boolean
+  title: string | null
+  game: string | null
+  viewers: number | null
+  started_at: string | null
+  avatar_url: string
+  thumbnail_url: string
+  notify_enabled: boolean
+}
+
+export interface WatchStatus {
+  active: boolean
+  mode: WatchMode
+  in_ad_break: boolean
+  serving_backup?: boolean
+  serving_bridge?: boolean
+  backup_player_type?: string | null
+  backup_quality?: string | null
+  holding?: boolean
+}
+
+export interface PushSubscriptionInfo {
+  id: number
+  endpoint: string
+  label: string | null
+  failure_count: number
+  created_at: string
+  last_success_at: string | null
 }

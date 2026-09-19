@@ -5,6 +5,7 @@ import { QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-qu
 import { Toaster } from 'sonner'
 import App from './App'
 import { ApiError } from './lib/api'
+import { registerServiceWorker } from './lib/push'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -31,6 +32,8 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+registerServiceWorker()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

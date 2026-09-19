@@ -1,17 +1,26 @@
 """Go-live push notifications.
 
-Delivery goes through the Streamyfin companion plugin's notification endpoint,
-because Jellyfin itself has no way to push to a client that is not currently
-open: its web PWA ships a service worker that only does offline caching, with no
-Web Push subscription.
+Two independent delivery channels, sharing one set of message templates:
+
+* **Web Push** from JellyTTV's own PWA, to every browser or installed app that
+  subscribed (see services.webpush). Tapping it opens the built-in player.
+* The **Streamyfin** companion plugin's notification endpoint on Jellyfin, for
+  people watching in a Jellyfin client. Jellyfin itself cannot push to a client
+  that is not open: its web PWA's service worker only does offline caching.
+
+Either can fail or be switched off without affecting the other.
 """
 
 from __future__ import annotations
 
+from sqlmodel.ext.asyncio.session import AsyncSession
+
 from app.logging_conf import get_logger
 from app.models import Channel
+from app.services import webpush
 from app.services.jellyfin import JellyfinClient, JellyfinError
 from app.services.settings_store import ResolvedSettings
+from app.util import utcnow
 
 log = get_logger(__name__)
 
@@ -71,14 +80,64 @@ async def send(settings: ResolvedSettings, title: str, body: str, *, subtitle: s
             raise NotificationError(str(exc)) from exc
 
 
-async def notify_live(settings: ResolvedSettings, channel: Channel) -> bool:
-    """Announce that a channel went live. Returns whether anything was sent."""
-    if not settings.row.notify_on_live:
-        return False
+def web_push_payload(settings: ResolvedSettings, channel: Channel) -> dict:
+    """What the service worker turns into a notification.
+
+    Image urls are root-relative: the service worker resolves them against its
+    own origin, which is whatever origin the device subscribed from.
+    """
     title, body = build_message(settings, channel)
-    try:
-        await send(settings, title, body, subtitle=channel.live_game or None)
-    except PluginMissing as exc:
-        log.warning("go-live notification skipped", login=channel.twitch_login, error=str(exc))
+    login = channel.twitch_login
+    return {
+        "title": title,
+        "body": body,
+        "icon": f"/api/channels/{channel.id}/avatar",
+        # Cache-busted so a phone never shows the previous broadcast's preview.
+        "image": f"/api/channels/{channel.id}/thumbnail?v={int(utcnow().timestamp())}",
+        # One notification per channel: a flapping stream replaces, not stacks.
+        "tag": f"live-{login}",
+        "url": f"/watch/{login}",
+    }
+
+
+async def notify_live(
+    settings: ResolvedSettings, channel: Channel, session: AsyncSession | None = None
+) -> bool:
+    """Announce that a channel went live. Returns whether anything was sent.
+
+    Web Push needs a database session (the subscriptions live there), so it is
+    skipped when none is given.
+    """
+    if not channel.notify_enabled:
         return False
-    return True
+    sent = False
+
+    if session is not None and settings.row.webpush_enabled:
+        try:
+            report = await webpush.send_all(session, settings, web_push_payload(settings, channel))
+        except Exception as exc:  # noqa: BLE001 - must not block the Jellyfin channel
+            log.warning("web push failed", login=channel.twitch_login, error=str(exc))
+        else:
+            sent = sent or report.sent > 0
+            if report.total:
+                log.info(
+                    "go-live web push delivered",
+                    login=channel.twitch_login,
+                    sent=report.sent,
+                    failed=report.failed,
+                    removed=report.removed,
+                )
+
+    if settings.row.notify_on_live:
+        title, body = build_message(settings, channel)
+        try:
+            await send(settings, title, body, subtitle=channel.live_game or None)
+        except PluginMissing as exc:
+            log.warning("go-live notification skipped", login=channel.twitch_login, error=str(exc))
+        except NotificationError as exc:
+            if not sent:
+                raise
+            log.warning("streamyfin notification failed", login=channel.twitch_login, error=str(exc))
+        else:
+            sent = True
+    return sent

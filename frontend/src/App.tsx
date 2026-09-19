@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -9,6 +10,9 @@ import Channels from '@/pages/Channels'
 import Vods from '@/pages/Vods'
 import Jobs from '@/pages/Jobs'
 import Settings from '@/pages/Settings'
+
+// Split out: hls.js is most of its weight, and only the player needs it.
+const Watch = lazy(() => import('@/pages/Watch'))
 import Setup from '@/pages/Setup'
 import Login from '@/pages/Login'
 
@@ -52,6 +56,8 @@ export default function App() {
     <Layout connected={connected} username={session.data?.username ?? null}>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/watch" element={<WatchRoute />} />
+        <Route path="/watch/:login" element={<WatchRoute />} />
         <Route path="/channels" element={<Channels />} />
         <Route path="/vods" element={<Vods />} />
         <Route path="/jobs" element={<Jobs />} />
@@ -59,5 +65,19 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Layout>
+  )
+}
+
+function WatchRoute() {
+  return (
+    <Suspense
+      fallback={
+        <div className="grid place-items-center py-24">
+          <Spinner className="size-6" />
+        </div>
+      }
+    >
+      <Watch />
+    </Suspense>
   )
 }

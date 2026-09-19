@@ -7,6 +7,7 @@ import {
   ListVideo,
   LogOut,
   Menu,
+  MonitorPlay,
   Settings as SettingsIcon,
   Tv,
   Wifi,
@@ -20,6 +21,7 @@ import { Button } from './ui'
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/watch', label: 'Watch', icon: MonitorPlay, end: false },
   { to: '/channels', label: 'Channels', icon: Tv, end: false },
   { to: '/vods', label: 'VODs', icon: ListVideo, end: false },
   { to: '/jobs', label: 'Activity', icon: Activity, end: false },
@@ -125,7 +127,7 @@ function Brand({ compact }: { compact?: boolean }) {
       {!compact && (
         <div className="leading-tight">
           <p className="text-sm font-semibold text-white">JellyTTV</p>
-          <p className="text-[11px] text-ink-400">Twitch → Jellyfin</p>
+          <p className="text-[11px] text-ink-400">Twitch, ad-free</p>
         </div>
       )}
       {compact && <p className="text-sm font-semibold text-white">JellyTTV</p>}

@@ -47,6 +47,8 @@ class SettingsUpdate(BaseModel):
     notify_on_live: bool | None = None
     notify_title_template: str | None = Field(default=None, max_length=200)
     notify_body_template: str | None = Field(default=None, max_length=400)
+    webpush_enabled: bool | None = None
+    web_proxy_segments: bool | None = None
 
     tuner_include_offline: bool | None = None
     proxy_enabled: bool | None = None
@@ -89,6 +91,8 @@ class SettingsOut(BaseModel):
     notify_on_live: bool
     notify_title_template: str
     notify_body_template: str
+    webpush_enabled: bool
+    web_proxy_segments: bool
 
     tuner_token: str | None
     tuner_include_offline: bool
@@ -129,6 +133,7 @@ class ChannelUpdate(BaseModel):
     series_dir: str | None = None
     enabled: bool | None = None
     live_enabled: bool | None = None
+    notify_enabled: bool | None = None
     vod_mode: VodMode | None = None
     quality: str | None = None
     season_scheme: SeasonScheme | None = None
@@ -146,6 +151,7 @@ class ChannelOut(BaseModel):
     offline_image_url: str | None
     enabled: bool
     live_enabled: bool
+    notify_enabled: bool
     vod_mode: VodMode
     quality: str
     season_scheme: SeasonScheme
@@ -184,6 +190,7 @@ class ChannelOut(BaseModel):
             offline_image_url=channel.offline_image_url,
             enabled=channel.enabled,
             live_enabled=channel.live_enabled,
+            notify_enabled=channel.notify_enabled,
             vod_mode=channel.vod_mode,
             quality=channel.quality,
             season_scheme=channel.season_scheme,
@@ -284,6 +291,8 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         notify_on_live=row.notify_on_live,
         notify_title_template=row.notify_title_template,
         notify_body_template=row.notify_body_template,
+        webpush_enabled=row.webpush_enabled,
+        web_proxy_segments=row.web_proxy_segments,
         tuner_token=row.tuner_token,
         tuner_include_offline=row.tuner_include_offline,
         proxy_enabled=row.proxy_enabled,
@@ -305,3 +314,28 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         m3u_url=f"{base}/tuner/playlist.m3u{token}",
         xmltv_url=f"{base}/tuner/guide.xml{token}",
     )
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=256)
+    auth: str = Field(min_length=1, max_length=256)
+
+
+class PushSubscribeRequest(BaseModel):
+    endpoint: str = Field(min_length=8, max_length=2048)
+    keys: PushKeys
+    label: str | None = Field(default=None, max_length=120)
+
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str | None = Field(default=None, max_length=2048)
+    id: int | None = None
+
+
+class PushSubscriptionOut(BaseModel):
+    id: int
+    endpoint: str
+    label: str | None
+    failure_count: int
+    created_at: datetime
+    last_success_at: datetime | None

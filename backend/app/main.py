@@ -17,6 +17,7 @@ from app.routers import (
     api_auth,
     api_channels,
     api_debug,
+    api_push,
     api_settings,
     api_system,
     api_vods,
@@ -24,6 +25,7 @@ from app.routers import (
     hls,
     stream,
     tuner,
+    watch,
 )
 from app.services import http as shared_http
 from app.services import stream_session
@@ -92,6 +94,8 @@ app.include_router(api_channels.router)
 app.include_router(api_vods.router)
 app.include_router(api_system.router)
 app.include_router(api_debug.router)
+app.include_router(api_push.router)
+app.include_router(watch.router)
 app.include_router(tuner.router)
 app.include_router(stream.router)
 app.include_router(hls.router)
@@ -133,6 +137,19 @@ if static_dir.is_dir():
             return FileResponse(path, media_type="application/manifest+json")
         return JSONResponse(status_code=404, content={"detail": "not found"})
 
+    @app.get("/sw.js", include_in_schema=False)
+    async def service_worker():  # pragma: no cover
+        # Never cached by the browser's HTTP cache: a stale worker keeps serving
+        # a stale app shell, and updates are how a worker fix ever reaches you.
+        path = static_dir / "sw.js"
+        if path.exists():
+            return FileResponse(
+                path,
+                media_type="text/javascript",
+                headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+            )
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
     @app.get("/icon-{size}.png", include_in_schema=False)
     async def icon_png(size: str):  # pragma: no cover
         path = static_dir / f"icon-{size}.png"
@@ -151,7 +168,7 @@ if static_dir.is_dir():
     async def spa(full_path: str):
         # Anything that is not an API/tuner route falls through to the SPA so
         # client-side routing works on refresh.
-        if full_path.startswith(("api/", "tuner/", "hls/", "eventsub/", "vod/")):
+        if full_path.startswith(("api/", "tuner/", "hls/", "stream/", "eventsub/", "vod/")):
             return JSONResponse(status_code=404, content={"detail": "not found"})
         index = static_dir / "index.html"
         if index.exists():

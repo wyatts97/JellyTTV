@@ -6,11 +6,15 @@ import type {
   JellyfinLibrary,
   Job,
   LogEntry,
+  PushSubscriptionInfo,
   SessionState,
   Settings,
   Vod,
   VodMode,
   VodState,
+  WatchInfo,
+  WatchMode,
+  WatchStatus,
 } from './types'
 
 export class ApiError extends Error {
@@ -121,7 +125,25 @@ export const api = {
   retryVod: (id: number) => post<{ queued: boolean }>(`/api/vods/${id}/retry`),
   deleteVodFile: (id: number) => request<{ removed: boolean }>(`/api/vods/${id}/file`, { method: 'DELETE' }),
   skipVod: (id: number) => post<{ ok: boolean }>(`/api/vods/${id}/skip`),
+
+  watchInfo: (login: string) => request<WatchInfo>(`/api/watch/${encodeURIComponent(login)}`),
+  watchStatus: (login: string, mode: WatchMode) =>
+    request<WatchStatus>(`/api/watch/${encodeURIComponent(login)}/status?mode=${mode}`),
+
+  pushKey: () => request<{ public_key: string; enabled: boolean }>('/api/push/key'),
+  pushSubscriptions: () => request<PushSubscriptionInfo[]>('/api/push/subscriptions'),
+  pushSubscribe: (payload: {
+    endpoint: string
+    keys: { p256dh: string; auth: string }
+    label?: string
+  }) => post<PushSubscriptionInfo>('/api/push/subscriptions', payload),
+  pushUnsubscribe: (payload: { endpoint?: string; id?: number }) =>
+    request<void>('/api/push/subscriptions', { method: 'DELETE', body: JSON.stringify(payload) }),
+  pushTest: () => post<ConnectionTest>('/api/push/test'),
 }
+
+export const watchPlaylistUrl = (login: string, mode: WatchMode) =>
+  `/api/watch/${encodeURIComponent(login)}/live.m3u8?mode=${mode}`
 
 export const VOD_MODE_LABELS: Record<VodMode, string> = {
   off: 'No VODs',
