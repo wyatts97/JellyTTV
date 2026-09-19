@@ -336,7 +336,36 @@ async def test_a_full_ad_pod_is_held_over_never_shown():
     assert HOLD_URI_PREFIX in renders[1].text, "the break was not held"
 
     session = stream_session.get("adapt", "best")
-    assert session.stats.hold_segments == 2, "one hold per ad poll"
+    # Every 2s ad segment is replaced by two 1s holds as it appears, so the
+    # timeline grows at real time through the break. One hold per *poll* (the
+    # old rule) fed a player 1s of media every ~2.5s and starved it.
+    assert session.stats.hold_segments == 16, "the 16s pod was not covered second for second"
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_a_break_at_the_live_edge_never_stalls_the_playlist():
+    """The freeze at the start of every break.
+
+    A break begins at the live edge while real content is still in the window.
+    Cutting those ad segments out and appending nothing left the playlist frozen
+    until the pod filled the whole window (~30s on Twitch) - the player ran dry
+    long before the hold started. Each new ad segment must be covered at once.
+    """
+    playlists = [
+        build_playlist(start_seq=100, count=6),
+        # 104-105 content... the pod starts at the live edge, content still ahead of it.
+        build_playlist(start_seq=102, count=6, ad_at=106, ad_len=20, ad_duration=40.0),
+        build_playlist(start_seq=104, count=6, ad_at=106, ad_len=20, ad_duration=40.0),
+    ]
+    renders, _ = await poll_all(playlists, with_hold=True)
+
+    # Not yet an all-ad pod, yet the window keeps growing by what upstream added.
+    assert [r.ad_pod for r in renders] == [False, False, False]
+    counts = [r.segment_count for r in renders]
+    assert counts[1] > counts[0] and counts[2] > counts[1], f"playlist stalled: {counts}"
+    joined = "\n".join(r.text for r in renders)
+    assert "ad10" not in joined and "ad11" not in joined, "an ad segment reached the client"
+    assert HOLD_URI_PREFIX in renders[1].text
     assert_playlist_continuity([r.text for r in renders])
 
 
@@ -521,15 +550,17 @@ async def test_the_backup_search_starts_at_the_live_edge_not_at_a_full_pod():
 
     renders, _ = await poll_all(native, backup=find_backup)
 
-    # The mixed poll serves the native stream with the ads stripped out of it,
-    # and promotes nothing: `ad_pod` still decides what is played.
+    # The mixed poll serves the native stream with the ads held over, and
+    # promotes nothing: `ad_pod` still decides what is played.
     assert renders[1].backup_player_type is None
     assert searches["n"] >= 1, "the live-edge pod should have started a search"
+    holds_before = stream_session.get("adapt", "best").stats.hold_segments
 
-    # ...and the first ad-only poll is already covered, with no hold segment.
+    # ...and the first ad-only poll is already covered by the backup: the holds
+    # from the live-edge seconds scroll by, and no new ones are added.
     assert renders[2].backup_player_type == "picture-by-picture"
-    assert HOLD_URI_PREFIX not in renders[2].text, (
-        "a prefetched candidate should mean the break never needs holding"
+    assert stream_session.get("adapt", "best").stats.hold_segments == holds_before, (
+        "a prefetched candidate should mean the break needs no further holding"
     )
     assert renders[2].segment_count > 0, "the break produced no media"
     assert_playlist_continuity([r.text for r in renders])

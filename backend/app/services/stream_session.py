@@ -444,13 +444,18 @@ def _advance(
     strip_ads: bool,
     rewrite_uri: UriRewriter | None,
     now: float,
+    hold_uri: HoldUri | None = None,
 ) -> int:
     """Fold one poll into the session. Returns the number of segments removed.
 
-    Deliberately has no opinion on what to do about an all-ad poll: the caller
-    decides which source to fold and whether stripping applies, because that
-    decision needs to know whether a backup is available and this function does
-    not. See `get_playlist`.
+    With `hold_uri`, a stripped ad segment is not dropped but *replaced*, the
+    moment it first appears, by the same length of hold segments. Dropping it
+    was the freeze at the start of every break: a break begins at the live edge
+    while real content is still in the window, so the pod was cut out, nothing
+    new was appended, and the playlist stood still for the ~30s it took the ads
+    to fill the whole window - by which time the player had long run dry. The
+    replacement keeps the timeline growing at exactly real time, however the
+    break lines up with the window.
     """
     rewriter = rewrite_uri or (lambda u: u)
 
@@ -462,12 +467,26 @@ def _advance(
     if parsed.passthrough_tags:
         session.passthrough_tags = list(parsed.passthrough_tags)
 
-    kept = [s for s in parsed.segments if not s.is_ad] if strip_ads else list(parsed.segments)
-    removed = len(parsed.segments) - len(kept)
+    substitute = strip_ads and hold_uri is not None
+    if strip_ads and not substitute:
+        kept = [s for s in parsed.segments if not s.is_ad]
+    else:
+        kept = list(parsed.segments)
+    removed = sum(1 for s in parsed.segments if s.is_ad) if strip_ads else 0
 
     prev_index: int | None = None
     for seg in kept:
         key = segment_key(seg, session.generation)
+        if substitute and seg.is_ad:
+            if key not in session.seen:
+                _append_hold_for(session, hold_uri, seg.duration, now)
+                session.seen[key] = (session.next_seq - 1, now + SEEN_TTL)
+            prev_index = seg.index
+            # Continuity is measured across the break: the content after it
+            # carries on from where the ad's own timestamps end.
+            session.last_pdt_epoch = seg.program_date_epoch
+            session.last_pdt_duration = seg.duration
+            continue
         if key in session.seen:
             prev_index = seg.index
             session.last_pdt_epoch = seg.program_date_epoch
@@ -476,6 +495,8 @@ def _advance(
 
         # A hole in the upstream indices means segments were removed here.
         gap = prev_index is not None and seg.index != prev_index + 1
+        # Leaving a run of holds is a source change.
+        _end_hold(session)
         discontinuity = (
             seg.discontinuity_before
             or gap
@@ -577,6 +598,19 @@ def _append_hold(session: StreamSession, hold_uri: HoldUri, now: float) -> None:
     session.last_pdt_duration = 0.0
     _evict(session)
     _prune_seen(session, now)
+
+
+def _append_hold_for(
+    session: StreamSession, hold_uri: HoldUri, seconds: float, now: float
+) -> None:
+    """Cover `seconds` of removed advertising with one-second holds.
+
+    The count is rounded, not floored: a 2.002s ad segment is two holds, so the
+    output timeline tracks real time instead of falling a little further behind
+    with every segment of a long break.
+    """
+    for _ in range(max(1, round(seconds / HOLD_SEGMENT_SECONDS))):
+        _append_hold(session, hold_uri, now)
 
 
 def _end_hold(session: StreamSession) -> None:
@@ -1069,16 +1103,24 @@ async def get_playlist(
         if served_backup:
             _end_hold(session)
 
-        # A break the backup could not cover is held, not shown. This is
-        # independent of `backup` so it still applies while a search is in
-        # flight, when every player type is dirty, and on a deployment with no
-        # backup search at all.
+        # A break the backup could not cover is held, not shown: every ad
+        # segment is replaced by holds of the same length as it arrives (see
+        # `_advance`). This is independent of `backup` so it still applies while
+        # a search is in flight, when every player type is dirty, and on a
+        # deployment with no backup search at all.
+        removed = 0
         held = False
-        if not served_backup and ad_pod and hold_uri is not None:
-            _append_hold(session, hold_uri, now)
+        if not served_backup and strip_ads and hold_uri is not None:
+            removed = _advance(
+                session,
+                parsed,
+                strip_ads=True,
+                rewrite_uri=rewrite_uri,
+                now=now,
+                hold_uri=hold_uri,
+            )
             held = True
 
-        removed = 0
         if not served_backup and not held:
             _end_hold(session)
             # `strip_ads and not ad_pod` is the whole policy: strip ads out of a

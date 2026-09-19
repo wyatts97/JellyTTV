@@ -16,3 +16,7 @@ slowapi==0.1.9
 yt-dlp==2025.1.26
 streamlink==7.1.1
 pywebpush==2.0.3
+# Held back: urllib3 2.8.0 breaks streamlink's Twitch requests (7.1.1 and 8.5.0
+# alike: "Unable to open URL: https://gql.twitch.tv/gql"), so every live stream
+# fails to start. Transitive via requests; pinned so a rebuild cannot pick it up.
+urllib3==2.7.0
