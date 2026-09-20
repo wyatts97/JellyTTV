@@ -11,9 +11,10 @@ import {
   CardBody,
   EmptyState,
   Field,
+  PageHeader,
   Progress,
   Select,
-  Spinner,
+  SkeletonRows,
 } from '@/components/ui'
 import { episodeTag, formatBytes, formatDate, formatDuration } from '@/lib/utils'
 
@@ -82,12 +83,10 @@ export default function Vods() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-white">VODs</h1>
-        <p className="mt-1 text-sm text-ink-400">
-          {totals.count} shown · {formatBytes(totals.bytes)} archived on disk
-        </p>
-      </div>
+      <PageHeader
+        title="VODs"
+        description={`${totals.count} shown · ${formatBytes(totals.bytes)} archived on disk`}
+      />
 
       <Card>
         <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -118,9 +117,9 @@ export default function Vods() {
       </Card>
 
       {isLoading ? (
-        <div className="grid place-items-center py-20">
-          <Spinner className="size-6" />
-        </div>
+        <Card>
+          <SkeletonRows count={8} />
+        </Card>
       ) : !vods || vods.length === 0 ? (
         <Card>
           <EmptyState
@@ -194,19 +193,19 @@ function VodRow({
           )}
           <div className="min-w-0">
             <p className="line-clamp-2 text-ink-200">{vod.title}</p>
-            <p className="mt-0.5 font-mono text-[11px] text-ink-400">
+            <p className="mt-0.5 font-mono text-xs text-ink-400">
               {episodeTag(vod.season, vod.episode)}
             </p>
             {vod.state === 'downloading' && (
               <div className="mt-2 w-40">
                 <Progress value={vod.progress} />
-                <span className="mt-1 block text-[11px] text-ink-400">
+                <span className="mt-1 block text-xs text-ink-400">
                   {vod.progress.toFixed(0)}%
                 </span>
               </div>
             )}
             {vod.error && (
-              <p className="mt-1.5 line-clamp-2 text-[11px] text-rose-400">{vod.error}</p>
+              <p className="mt-1.5 line-clamp-2 text-xs text-rose-400">{vod.error}</p>
             )}
           </div>
         </div>
@@ -216,7 +215,7 @@ function VodRow({
       <td className="px-4 py-3 text-ink-300">{formatDuration(vod.duration_s)}</td>
       <td className="px-4 py-3">
         <Badge tone={STATE_TONES[vod.state]}>{vod.state}</Badge>
-        <span className="mt-1 block text-[11px] text-ink-400">{vod.mode}</span>
+        <span className="mt-1 block text-xs text-ink-400">{vod.mode}</span>
       </td>
       <td className="px-4 py-3 text-ink-300">{vod.bytes ? formatBytes(vod.bytes) : '—'}</td>
       <td className="px-4 py-3">

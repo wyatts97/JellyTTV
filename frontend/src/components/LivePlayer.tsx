@@ -8,13 +8,17 @@ import {
   Pause,
   PictureInPicture2,
   Play,
+  RectangleHorizontal,
   RotateCw,
   ShieldCheck,
+  Shrink,
   Volume2,
   VolumeX,
 } from 'lucide-react'
 import { api, watchPlaylistUrl } from '@/lib/api'
+import { PREF, readPref, writePref } from '@/lib/prefs'
 import type { WatchMode } from '@/lib/types'
+import { useUiState } from '@/lib/uiState'
 import { cn } from '@/lib/utils'
 
 /**
@@ -65,24 +69,14 @@ const PLAYLIST_POLICY = {
   },
 }
 
-function readStored<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key)
-    return raw === null ? fallback : (JSON.parse(raw) as T)
-  } catch {
-    return fallback
-  }
-}
-
-function store(key: string, value: unknown) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    /* private mode or storage blocked - a preference, not state */
-  }
-}
-
 type Phase = 'loading' | 'playing' | 'buffering' | 'error'
+
+/** `1080p60`, the way Twitch and every other player spell a rendition. */
+function levelLabel(level: { height?: number; bitrate?: number; attrs?: Record<string, string> }): string {
+  if (!level.height) return `${Math.round((level.bitrate ?? 0) / 1000)}k`
+  const fps = Number(level.attrs?.['FRAME-RATE'])
+  return `${level.height}p${Number.isFinite(fps) && fps >= 50 ? '60' : ''}`
+}
 
 export function LivePlayer({
   login,
@@ -109,13 +103,17 @@ export function LivePlayer({
   const [phase, setPhase] = useState<Phase>('loading')
   const [error, setError] = useState<string | null>(null)
   const [paused, setPaused] = useState(false)
-  const [muted, setMuted] = useState<boolean>(() => readStored('jellyttv.player.muted', false))
-  const [volume, setVolume] = useState<number>(() => readStored('jellyttv.player.volume', 1))
+  const [muted, setMuted] = useState<boolean>(() => readPref(PREF.muted, false))
+  const [volume, setVolume] = useState<number>(() => readPref(PREF.volume, 1))
   const [needsUnmute, setNeedsUnmute] = useState(false)
   const [height, setHeight] = useState<number | null>(null)
   const [latency, setLatency] = useState<number | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
   const [controlsVisible, setControlsVisible] = useState(true)
+  // Renditions hls.js found, plus which one is playing (-1 is auto).
+  const [levels, setLevels] = useState<{ index: number; label: string }[]>([])
+  const [currentLevel, setCurrentLevel] = useState(-1)
+  const { theater, setTheater } = useUiState()
 
   const rebuild = useCallback(() => setGeneration((g) => g + 1), [])
   // Survives rebuilds, so a stream that keeps failing eventually says so.
@@ -162,10 +160,11 @@ export function LivePlayer({
     setPhase('loading')
     setError(null)
     setHeight(null)
+    setLevels([])
 
     const start = () => {
-      video.muted = readStored('jellyttv.player.muted', false)
-      video.volume = readStored('jellyttv.player.volume', 1)
+      video.muted = readPref(PREF.muted, false)
+      video.volume = readPref(PREF.volume, 1)
       userPaused.current = false
       video.play().catch(() => {
         // Autoplay with sound was refused; muted autoplay is always allowed.
@@ -203,7 +202,12 @@ export function LivePlayer({
         video.disableRemotePlayback = true
       }
 
-      hls.on(Hls.Events.MANIFEST_PARSED, start)
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setLevels(hls.levels.map((level, index) => ({ index, label: levelLabel(level) })))
+        setCurrentLevel(hls.currentLevel)
+        start()
+      })
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setCurrentLevel(data.level))
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
         networkRetries.current = 0
       })
@@ -401,7 +405,7 @@ export function LivePlayer({
     video.muted = !video.muted
     if (!video.muted && video.volume === 0) video.volume = 0.5
     setNeedsUnmute(false)
-    store('jellyttv.player.muted', video.muted)
+    writePref(PREF.muted, video.muted)
   }, [])
 
   const changeVolume = useCallback((value: number) => {
@@ -410,8 +414,8 @@ export function LivePlayer({
     video.volume = value
     video.muted = value === 0
     setNeedsUnmute(false)
-    store('jellyttv.player.volume', value)
-    store('jellyttv.player.muted', video.muted)
+    writePref(PREF.volume, value)
+    writePref(PREF.muted, video.muted)
   }, [])
 
   const jumpToLive = useCallback(() => {
@@ -430,6 +434,16 @@ export function LivePlayer({
     } else {
       video?.webkitEnterFullscreen?.()
     }
+  }, [])
+
+  const toggleTheater = useCallback(() => setTheater(!theater), [setTheater, theater])
+
+  const changeLevel = useCallback((index: number) => {
+    const hls = hlsRef.current
+    if (!hls) return
+    // -1 is hls.js's "pick for me"; anything else pins the rendition.
+    hls.currentLevel = index
+    setCurrentLevel(index)
   }, [])
 
   const togglePip = useCallback(async () => {
@@ -461,6 +475,9 @@ export function LivePlayer({
         case 'f':
           toggleFullscreen()
           break
+        case 't':
+          toggleTheater()
+          break
         case 'l':
           jumpToLive()
           break
@@ -468,7 +485,7 @@ export function LivePlayer({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [togglePlay, toggleMute, toggleFullscreen, jumpToLive])
+  }, [togglePlay, toggleMute, toggleFullscreen, jumpToLive, toggleTheater])
 
   const hideTimer = useRef<number | undefined>(undefined)
   const pokeControls = useCallback(() => {
@@ -489,6 +506,9 @@ export function LivePlayer({
       className={cn(
         'group relative aspect-video w-full overflow-hidden bg-black',
         fullscreen ? 'rounded-none' : 'rounded-xl',
+        // Theater fills the window rather than overflowing it: the aspect ratio
+        // still drives the width, but never past the viewport height.
+        theater && 'mx-auto max-h-[calc(100vh-2rem)] w-auto max-w-full rounded-none',
         !showControls && 'cursor-none',
       )}
       onMouseMove={pokeControls}
@@ -582,15 +602,36 @@ export function LivePlayer({
             Live
           </button>
           {latency !== null && (
-            <span className="hidden text-[11px] tabular-nums text-ink-300 sm:inline" title="Delay behind the broadcast">
+            <span className="hidden text-xs tabular-nums text-ink-300 sm:inline" title="Delay behind the broadcast">
               {latency.toFixed(1)}s
             </span>
           )}
 
           <div className="flex-1" />
 
-          {height && (
-            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums">{height}p</span>
+          {levels.length > 1 ? (
+            <label className="relative">
+              <span className="sr-only">Quality</span>
+              <select
+                value={currentLevel}
+                onChange={(event) => changeLevel(Number(event.target.value))}
+                className="cursor-pointer appearance-none rounded bg-white/10 px-1.5 py-1 text-xs font-medium tabular-nums text-white hover:bg-white/20 focus-visible:ring-1 [&>option]:bg-ink-900"
+                title="Quality"
+              >
+                <option value={-1}>Auto{height ? ` (${height}p)` : ''}</option>
+                {levels.map((level) => (
+                  <option key={level.index} value={level.index}>
+                    {level.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            height && (
+              <span className="rounded bg-white/10 px-1.5 py-0.5 text-xs font-medium tabular-nums">
+                {height}p
+              </span>
+            )
           )}
           <ModeSwitch mode={mode} onChange={onModeChange} />
           {pipSupported && (
@@ -598,6 +639,12 @@ export function LivePlayer({
               <PictureInPicture2 className="size-5" />
             </IconButton>
           )}
+          <IconButton
+            label={theater ? 'Exit theater mode (t)' : 'Theater mode (t)'}
+            onClick={toggleTheater}
+          >
+            {theater ? <Shrink className="size-5" /> : <RectangleHorizontal className="size-5" />}
+          </IconButton>
           <IconButton label={fullscreen ? 'Exit fullscreen (f)' : 'Fullscreen (f)'} onClick={toggleFullscreen}>
             {fullscreen ? <Minimize className="size-5" /> : <Maximize className="size-5" />}
           </IconButton>
@@ -631,7 +678,7 @@ function IconButton({
 
 function ModeSwitch({ mode, onChange }: { mode: WatchMode; onChange: (mode: WatchMode) => void }) {
   return (
-    <div className="flex rounded-md bg-white/10 p-0.5 text-[11px] font-medium" role="radiogroup" aria-label="Source">
+    <div className="flex rounded-md bg-white/10 p-0.5 text-xs font-medium" role="radiogroup" aria-label="Source">
       {(
         [
           ['bridged', 'Best', 'Full quality; ad breaks switch to an ad-free source'],

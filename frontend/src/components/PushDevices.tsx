@@ -150,7 +150,7 @@ export function PushDevices() {
                     {device.endpoint === myEndpoint && <Badge tone="info">this device</Badge>}
                     {device.failure_count > 0 && <Badge tone="warning">{device.failure_count} failed</Badge>}
                   </p>
-                  <p className="text-[11px] text-ink-400">
+                  <p className="text-xs text-ink-400">
                     Added {formatRelative(device.created_at)}
                     {device.last_success_at && ` · last delivered ${formatRelative(device.last_success_at)}`}
                   </p>

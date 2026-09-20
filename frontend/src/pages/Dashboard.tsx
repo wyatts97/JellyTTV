@@ -18,9 +18,11 @@ import {
   CardHeader,
   EmptyState,
   LiveBadge,
+  PageHeader,
   PlayOverlay,
   Progress,
-  Spinner,
+  Skeleton,
+  SkeletonCards,
 } from '@/components/ui'
 import { formatBytes, formatNumber, formatRelative, formatUptime } from '@/lib/utils'
 
@@ -33,8 +35,14 @@ export default function Dashboard() {
 
   if (isLoading || !data) {
     return (
-      <div className="grid place-items-center py-24">
-        <Spinner className="size-6" />
+      <div className="space-y-6">
+        <PageHeader title="Dashboard" description="Loading…" />
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} className="h-28 rounded-xl" />
+          ))}
+        </div>
+        <SkeletonCards count={3} cardClassName="h-56" />
       </div>
     )
   }
@@ -43,12 +51,10 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-white">Dashboard</h1>
-        <p className="mt-1 text-sm text-ink-400">
-          {data.channels.enabled} of {data.channels.total} channels enabled · JellyTTV v{data.version}
-        </p>
-      </div>
+      <PageHeader
+        title="Dashboard"
+        description={`${data.channels.enabled} of ${data.channels.total} channels enabled · JellyTTV v${data.version}`}
+      />
 
       <SetupWarnings data={data} />
 
@@ -252,7 +258,7 @@ function LiveCard({ channel }: { channel: LiveChannel }) {
           <LiveBadge />
         </div>
         <p className="line-clamp-2 text-xs text-ink-300">{channel.title ?? 'Untitled stream'}</p>
-        <div className="flex items-center gap-3 text-[11px] text-ink-400">
+        <div className="flex items-center gap-3 text-xs text-ink-400">
           {channel.game && <span className="truncate">{channel.game}</span>}
           <span className="flex items-center gap-1">
             <Users className="size-3" aria-hidden />

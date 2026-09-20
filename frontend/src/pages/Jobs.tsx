@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity, ScrollText } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { JobState } from '@/lib/types'
-import { Badge, Card, CardHeader, EmptyState, Spinner } from '@/components/ui'
+import { Badge, Card, CardHeader, EmptyState, PageHeader, SkeletonRows } from '@/components/ui'
 import { formatDate, formatRelative } from '@/lib/utils'
 
 const JOB_TONES: Record<JobState, 'neutral' | 'info' | 'success' | 'danger' | 'warning'> = {
@@ -25,19 +25,15 @@ export default function Jobs() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-white">Activity</h1>
-        <p className="mt-1 text-sm text-ink-400">
-          Background jobs and the event log. Useful when something is not appearing in Jellyfin.
-        </p>
-      </div>
+      <PageHeader
+        title="Activity"
+        description="Background jobs and the event log. Useful when something is not appearing in Jellyfin."
+      />
 
       <Card className="overflow-hidden">
         <CardHeader title="Jobs" description="Newest first." />
         {jobs.isLoading ? (
-          <div className="grid place-items-center py-14">
-            <Spinner className="size-5" />
-          </div>
+          <SkeletonRows count={6} />
         ) : !jobs.data || jobs.data.length === 0 ? (
           <EmptyState icon={<Activity className="size-6" />} title="No jobs have run yet" />
         ) : (
@@ -77,9 +73,7 @@ export default function Jobs() {
       <Card>
         <CardHeader title="Event log" />
         {logs.isLoading ? (
-          <div className="grid place-items-center py-14">
-            <Spinner className="size-5" />
-          </div>
+          <SkeletonRows count={5} />
         ) : !logs.data || logs.data.length === 0 ? (
           <EmptyState icon={<ScrollText className="size-6" />} title="Nothing logged yet" />
         ) : (

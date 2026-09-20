@@ -1,7 +1,69 @@
-import { forwardRef, type ReactNode } from 'react'
+import { forwardRef, useRef, type ReactNode } from 'react'
 import { AlertTriangle, Loader2, X } from 'lucide-react'
 import { ApiError } from '@/lib/api'
+import { useDismissableLayer } from '@/lib/a11y'
 import { cn } from '@/lib/utils'
+
+/* -------------------------------------------------------------- PageHeader */
+/** The title block every page opens with: one shape, one set of spacings. */
+export function PageHeader({
+  title,
+  description,
+  actions,
+}: {
+  title: ReactNode
+  description?: ReactNode
+  actions?: ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="min-w-0">
+        <h1 className="text-lg font-semibold text-white">{title}</h1>
+        {description && <p className="mt-1 text-sm text-ink-400">{description}</p>}
+      </div>
+      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+    </div>
+  )
+}
+
+/* ---------------------------------------------------------------- Skeleton */
+/**
+ * A placeholder with the shape of the thing that is loading.
+ *
+ * Replaces a centred spinner, which tells you nothing about what is coming and
+ * collapses the layout so the page jumps when data lands.
+ */
+export function Skeleton({ className }: { className?: string }) {
+  return <div className={cn('skeleton rounded-md', className)} aria-hidden />
+}
+
+export function SkeletonCards({
+  count = 3,
+  className,
+  cardClassName = 'h-40',
+}: {
+  count?: number
+  className?: string
+  cardClassName?: string
+}) {
+  return (
+    <div className={cn('grid gap-4 sm:grid-cols-2 xl:grid-cols-3', className)} role="status" aria-label="Loading">
+      {Array.from({ length: count }, (_, i) => (
+        <Skeleton key={i} className={cn('rounded-xl', cardClassName)} />
+      ))}
+    </div>
+  )
+}
+
+export function SkeletonRows({ count = 6, className }: { count?: number; className?: string }) {
+  return (
+    <div className={cn('space-y-2 p-5', className)} role="status" aria-label="Loading">
+      {Array.from({ length: count }, (_, i) => (
+        <Skeleton key={i} className="h-10 w-full" />
+      ))}
+    </div>
+  )
+}
 
 /* ------------------------------------------------------------------ Button */
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'outline'
@@ -53,8 +115,21 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 })
 
 /* -------------------------------------------------------------------- Card */
-export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={cn('card-surface', className)}>{children}</div>
+export function Card({
+  className,
+  children,
+  id,
+}: {
+  className?: string
+  children: ReactNode
+  /** Anchor target, for pages with a section index. */
+  id?: string
+}) {
+  return (
+    <div id={id} className={cn('card-surface', id && 'scroll-mt-20', className)}>
+      {children}
+    </div>
+  )
 }
 
 export function CardHeader({
@@ -223,7 +298,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium',
+        'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium',
         BADGE_TONES[tone],
         className,
       )}
@@ -273,10 +348,23 @@ export function Modal({
   footer?: ReactNode
   wide?: boolean
 }) {
+  const panel = useRef<HTMLDivElement>(null)
+  // Escape, focus trap, focus restore and scroll lock. The markup claimed
+  // `aria-modal` long before any of that was true.
+  useDismissableLayer({ open, onClose, panelRef: panel })
+
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 sm:items-center">
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 sm:items-center"
+      onMouseDown={(event) => {
+        // Only a click on the backdrop itself, never one that started inside
+        // the panel and drifted out (a text selection, say).
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
       <div
+        ref={panel}
         className={cn(
           'card-surface my-8 w-full shadow-2xl',
           wide ? 'max-w-3xl' : 'max-w-lg',

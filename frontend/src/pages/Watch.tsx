@@ -1,32 +1,30 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, MessageSquare, MessageSquareOff, Radio, Tv, Users } from 'lucide-react'
 import { api } from '@/lib/api'
 import type { Channel, WatchMode } from '@/lib/types'
 import { LivePlayer } from '@/components/LivePlayer'
-import { Badge, Card, EmptyState, LiveBadge, PlayOverlay, QueryError, Spinner } from '@/components/ui'
+import {
+  Badge,
+  Card,
+  EmptyState,
+  LiveBadge,
+  PageHeader,
+  PlayOverlay,
+  QueryError,
+  Skeleton,
+  SkeletonCards,
+} from '@/components/ui'
+import { PREF, readEnumPref, readPref, writePref } from '@/lib/prefs'
+import { useUiState } from '@/lib/uiState'
 import { cn, formatNumber, formatUptime } from '@/lib/utils'
 
-const MODE_KEY = 'jellyttv.player.mode'
-const CHAT_KEY = 'jellyttv.player.chat'
-
-function readPref<T extends string>(key: string, fallback: T, allowed: readonly T[]): T {
-  try {
-    const value = localStorage.getItem(key) as T | null
-    return value && allowed.includes(value) ? value : fallback
-  } catch {
-    return fallback
-  }
-}
-
-function writePref(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* a preference, not state */
-  }
-}
+// Wide enough for Twitch's own embed to lay out, narrow enough to leave the
+// player the majority of a laptop screen.
+const CHAT_MIN_WIDTH = 260
+const CHAT_MAX_WIDTH = 520
+const CHAT_DEFAULT_WIDTH = 340
 
 export default function Watch() {
   const { login } = useParams()
@@ -39,8 +37,9 @@ function WatchIndex() {
 
   if (channels.isLoading) {
     return (
-      <div className="grid place-items-center py-24">
-        <Spinner className="size-6" />
+      <div className="space-y-6">
+        <PageHeader title="Watch" description="Loading channels…" />
+        <SkeletonCards count={6} cardClassName="h-64" />
       </div>
     )
   }
@@ -52,13 +51,10 @@ function WatchIndex() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold text-white">Watch</h1>
-        <p className="mt-1 text-sm text-ink-400">
-          {live.length} of {rows.length} channels live · played right here, with ad breaks switched to an
-          ad-free source
-        </p>
-      </div>
+      <PageHeader
+        title="Watch"
+        description={`${live.length} of ${rows.length} channels live · played right here, with ad breaks switched to a clean source`}
+      />
 
       {live.length === 0 ? (
         <Card>
@@ -124,7 +120,7 @@ function LiveTile({ channel }: { channel: Channel }) {
           <LiveBadge />
         </div>
         <p className="line-clamp-2 text-xs text-ink-300">{channel.live_title ?? 'Untitled stream'}</p>
-        <div className="flex items-center gap-3 text-[11px] text-ink-400">
+        <div className="flex items-center gap-3 text-xs text-ink-400">
           {channel.live_game && <span className="truncate">{channel.live_game}</span>}
           <span className="flex items-center gap-1">
             <Users className="size-3" aria-hidden />
@@ -139,8 +135,18 @@ function LiveTile({ channel }: { channel: Channel }) {
 /* ---------------------------------------------------------- single channel */
 function WatchChannel({ login }: { login: string }) {
   const queryClient = useQueryClient()
-  const [mode, setMode] = useState<WatchMode>(() => readPref(MODE_KEY, 'bridged', ['bridged', 'adfree']))
-  const [chat, setChat] = useState<'on' | 'off'>(() => readPref(CHAT_KEY, 'on', ['on', 'off']))
+  const { theater, setTheater } = useUiState()
+  const [mode, setMode] = useState<WatchMode>(() =>
+    readEnumPref(PREF.mode, 'bridged', ['bridged', 'adfree']),
+  )
+  const [chat, setChat] = useState<'on' | 'off'>(() => readEnumPref(PREF.chat, 'on', ['on', 'off']))
+  const [chatWidth, setChatWidth] = useState(() =>
+    clampChatWidth(readPref(PREF.chatWidth, CHAT_DEFAULT_WIDTH)),
+  )
+
+  // Theater mode belongs to the player, not the route: leaving the page must
+  // give the sidebar and the page chrome back.
+  useEffect(() => () => setTheater(false), [setTheater])
 
   const info = useQuery({
     queryKey: ['watch', login],
@@ -153,21 +159,37 @@ function WatchChannel({ login }: { login: string }) {
 
   const changeMode = useCallback((next: WatchMode) => {
     setMode(next)
-    writePref(MODE_KEY, next)
+    writePref(PREF.mode, next)
   }, [])
   const toggleChat = () => {
     const next = chat === 'on' ? 'off' : 'on'
     setChat(next)
-    writePref(CHAT_KEY, next)
+    writePref(PREF.chat, next)
   }
+  const commitChatWidth = useCallback((width: number) => {
+    const clamped = clampChatWidth(width)
+    setChatWidth(clamped)
+    writePref(PREF.chatWidth, clamped)
+  }, [])
+  // Relative, and applied to the latest width rather than the one this handler
+  // closed over: a held arrow key fires faster than React re-renders, and every
+  // press after the first would otherwise recompute from the same stale value.
+  const nudgeChatWidth = useCallback((delta: number) => {
+    setChatWidth((current) => {
+      const clamped = clampChatWidth(current + delta)
+      writePref(PREF.chatWidth, clamped)
+      return clamped
+    })
+  }, [])
   const onOffline = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ['watch', login] })
   }, [queryClient, login])
 
   if (info.isLoading) {
     return (
-      <div className="grid place-items-center py-24">
-        <Spinner className="size-6" />
+      <div className="space-y-4">
+        <Skeleton className="h-9 w-64" />
+        <Skeleton className="aspect-video w-full rounded-xl" />
       </div>
     )
   }
@@ -182,8 +204,8 @@ function WatchChannel({ login }: { login: string }) {
   )}&darkpopout`
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-3">
+    <div className={cn('space-y-4', theater && 'space-y-2')}>
+      <div className={cn('flex items-center gap-3', theater && 'hidden')}>
         <Link
           to="/watch"
           className="grid size-8 place-items-center rounded-lg text-ink-300 hover:bg-ink-800 hover:text-white"
@@ -218,7 +240,10 @@ function WatchChannel({ login }: { login: string }) {
         </button>
       </div>
 
-      <div className={cn('grid gap-4', chat === 'on' && 'lg:grid-cols-[minmax(0,1fr)_340px]')}>
+      <div
+        className={cn('grid gap-4', chat === 'on' && 'lg:grid-cols-[minmax(0,1fr)_var(--chat-w)]')}
+        style={{ '--chat-w': `${chatWidth}px` } as CSSProperties}
+      >
         <div className="min-w-0 space-y-3">
           {!channel.playable ? (
             <OfflinePanel channel={channel} message="Live playback is disabled for this channel in Channels." />
@@ -241,18 +266,26 @@ function WatchChannel({ login }: { login: string }) {
         </div>
 
         {chat === 'on' && (
-          <aside className="h-[60vh] overflow-hidden rounded-xl border border-ink-700/70 bg-ink-900 lg:sticky lg:top-6 lg:h-[calc(100vh-7rem)]">
-            <iframe
-              key={login}
-              src={chatSrc}
-              title={`${channel.display_name} chat`}
-              className="size-full"
-            />
-          </aside>
+          <div className="relative lg:sticky lg:top-6 lg:self-start">
+            <ChatResizer width={chatWidth} onChange={commitChatWidth} onNudge={nudgeChatWidth} />
+            <aside
+              className={cn(
+                'h-[60vh] overflow-hidden rounded-xl border border-ink-700/70 bg-ink-900',
+                theater ? 'lg:h-[calc(100vh-4rem)]' : 'lg:h-[calc(100vh-7rem)]',
+              )}
+            >
+              <iframe
+                key={login}
+                src={chatSrc}
+                title={`${channel.display_name} chat`}
+                className="size-full"
+              />
+            </aside>
+          </div>
         )}
       </div>
 
-      {others.length > 0 && (
+      {others.length > 0 && !theater && (
         <div>
           <h2 className="mb-2 text-sm font-medium text-ink-300">Also live</h2>
           <div className="flex gap-3 overflow-x-auto pb-2">
@@ -273,7 +306,7 @@ function WatchChannel({ login }: { login: string }) {
                 </div>
                 <div className="p-2">
                   <p className="truncate text-xs font-medium text-white">{c.display_name}</p>
-                  <p className="truncate text-[11px] text-ink-400">{c.live_game ?? c.live_title ?? ''}</p>
+                  <p className="truncate text-xs text-ink-400">{c.live_game ?? c.live_title ?? ''}</p>
                 </div>
               </Link>
             ))}
@@ -300,6 +333,76 @@ function OfflinePanel({
           <Tv className="size-3.5" /> Browse live channels
         </Link>
       </div>
+    </div>
+  )
+}
+
+
+function clampChatWidth(width: number): number {
+  if (!Number.isFinite(width)) return CHAT_DEFAULT_WIDTH
+  return Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, Math.round(width)))
+}
+
+/**
+ * Drag handle on the chat panel's left edge.
+ *
+ * Keyboard accessible as well as draggable: chat width is a real preference,
+ * and a mouse-only control would put it out of reach for anyone who does not
+ * use one. Rendered only at `lg`, where the two columns exist at all.
+ */
+function ChatResizer({
+  width,
+  onChange,
+  onNudge,
+}: {
+  width: number
+  onChange: (width: number) => void
+  onNudge: (delta: number) => void
+}) {
+  const dragging = useRef(false)
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      if (!dragging.current) return
+      // The panel is anchored to the right edge, so its width is whatever is
+      // left between the pointer and that edge.
+      onChange(window.innerWidth - event.clientX)
+    }
+    const onUp = () => {
+      dragging.current = false
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [onChange])
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize chat"
+      aria-valuenow={width}
+      aria-valuemin={CHAT_MIN_WIDTH}
+      aria-valuemax={CHAT_MAX_WIDTH}
+      tabIndex={0}
+      onPointerDown={(event) => {
+        event.preventDefault()
+        dragging.current = true
+        document.body.style.userSelect = 'none'
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowLeft') onNudge(24)
+        else if (event.key === 'ArrowRight') onNudge(-24)
+        else return
+        event.preventDefault()
+      }}
+      className="absolute -left-3 top-0 z-10 hidden h-full w-3 cursor-col-resize touch-none items-center justify-center lg:flex"
+    >
+      <span className="h-10 w-1 rounded-full bg-ink-700 transition-colors hover:bg-twitch-500" />
     </div>
   )
 }

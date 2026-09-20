@@ -7,7 +7,15 @@
   --color-ink-800: #171a24;
   --color-ink-700: #212533;
   --color-ink-600: #2e3345;
-  --color-ink-400: #6b7285;
+  /*
+    Secondary text. Was #6b7285, which is ~4.2:1 on the page background - under
+    WCAG AA for the 11-13px sizes it is used at, which is nearly every hint,
+    caption and metadata line in the app. This clears 4.5:1 on all three
+    surfaces it appears on (ink-950, ink-900, ink-850).
+  */
+  --color-ink-400: #8b93a7;
+  /* Purely decorative marks - separators, disabled glyphs. Never text. */
+  --color-ink-500: #6b7285;
   --color-ink-300: #9aa1b4;
   --color-ink-200: #c8ccd8;
 
@@ -73,4 +81,51 @@
 
 .live-dot {
   animation: pulse-live 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-sheen {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/*
+  A live dot that never stops pulsing and a sheen that never stops sweeping are
+  exactly what `prefers-reduced-motion` exists for. The information they carry -
+  "this is live", "this is loading" - survives without the movement.
+*/
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+
+  .skeleton::after {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.skeleton {
+  @apply relative overflow-hidden bg-ink-800;
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.04),
+    transparent
+  );
+  animation: skeleton-sheen 1.6s infinite;
 }

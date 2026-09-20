@@ -42,7 +42,9 @@ createRoot(document.getElementById('root')!).render(
         <App />
         <Toaster
           theme="dark"
-          position="bottom-right"
+          // Not bottom-right: that is exactly where the player's controls live,
+          // and a toast landing on the fullscreen button is a trap.
+          position="top-right"
           toastOptions={{
             style: {
               background: '#12141c',

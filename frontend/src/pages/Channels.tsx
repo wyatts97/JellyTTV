@@ -27,8 +27,9 @@ import {
   Input,
   LiveBadge,
   Modal,
+  PageHeader,
   Select,
-  Spinner,
+  SkeletonCards,
   Toggle,
 } from '@/components/ui'
 import { formatBytes, formatNumber, formatRelative, formatUptime } from '@/lib/utils'
@@ -78,22 +79,18 @@ export default function Channels() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold text-white">Channels</h1>
-          <p className="mt-1 text-sm text-ink-400">
-            Each channel becomes a Live TV channel and a Jellyfin series.
-          </p>
-        </div>
-        <Button variant="primary" onClick={() => setAddOpen(true)}>
-          <Plus className="size-4" /> Add channel
-        </Button>
-      </div>
+      <PageHeader
+        title="Channels"
+        description="Each channel becomes a Live TV channel and a Jellyfin series."
+        actions={
+          <Button variant="primary" onClick={() => setAddOpen(true)}>
+            <Plus className="size-4" /> Add channel
+          </Button>
+        }
+      />
 
       {isLoading ? (
-        <div className="grid place-items-center py-20">
-          <Spinner className="size-6" />
-        </div>
+        <SkeletonCards count={4} className="lg:grid-cols-2 xl:grid-cols-2" cardClassName="h-72" />
       ) : !channels || channels.length === 0 ? (
         <Card>
           <EmptyState
@@ -198,7 +195,7 @@ function ChannelCard({
         {channel.is_live && (
           <div className="rounded-lg border border-ink-700 bg-ink-850 p-3">
             <p className="line-clamp-2 text-xs text-ink-200">{channel.live_title}</p>
-            <div className="mt-1.5 flex items-center gap-3 text-[11px] text-ink-400">
+            <div className="mt-1.5 flex items-center gap-3 text-xs text-ink-400">
               {channel.live_game && <span className="truncate">{channel.live_game}</span>}
               <span className="flex items-center gap-1">
                 <Users className="size-3" aria-hidden /> {formatNumber(channel.live_viewers)}
@@ -237,7 +234,7 @@ function ChannelCard({
 
         <div className="flex items-center gap-1.5 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2">
           <FolderTree className="size-3.5 shrink-0 text-ink-400" aria-hidden />
-          <code className="min-w-0 truncate font-mono text-[11px] text-ink-300">
+          <code className="min-w-0 truncate font-mono text-xs text-ink-300">
             {channel.library_path}
           </code>
         </div>
@@ -531,7 +528,7 @@ function EditChannelModal({
 
         <div className="space-y-1.5 text-xs text-ink-400">
           <p className="font-medium text-ink-300">Stream URL used by Jellyfin</p>
-          <code className="block truncate rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 font-mono text-[11px]">
+          <code className="block truncate rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 font-mono text-xs">
             {channel.stream_url}
           </code>
         </div>

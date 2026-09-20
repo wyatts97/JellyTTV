@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   Card,
+  PageHeader,
   CardBody,
   CardHeader,
   CopyRow,
@@ -18,7 +19,7 @@ import {
   Spinner,
   Toggle,
 } from '@/components/ui'
-import { formatBytes } from '@/lib/utils'
+import { cn, formatBytes } from '@/lib/utils'
 import { PushDevices } from '@/components/PushDevices'
 
 type Draft = Record<string, unknown>
@@ -127,16 +128,18 @@ export default function Settings() {
   const eventsubPossible = publicUrl.startsWith('https://')
 
   return (
-    <div className="space-y-6 pb-24">
-      <div>
-        <h1 className="text-lg font-semibold text-white">Settings</h1>
-        <p className="mt-1 text-sm text-ink-400">
-          Everything here applies immediately after saving. JellyTTV v{diagnostics.data?.version}
-        </p>
-      </div>
+    <div className="pb-24">
+      <PageHeader
+        title="Settings"
+        description={`Everything here applies immediately after saving. JellyTTV v${diagnostics.data?.version ?? ''}`}
+      />
+
+      <div className="mt-6 gap-8 xl:grid xl:grid-cols-[176px_minmax(0,1fr)] xl:items-start">
+        <SectionNav />
+        <div className="space-y-6">
 
       {/* ------------------------------------------------------ Jellyfin URLs */}
-      <Card>
+      <Card id="jellyfin-urls">
         <CardHeader
           title="Add to Jellyfin"
           description="Paste these into Dashboard → Live TV. The tvg-id values match the guide, so channel mapping is automatic."
@@ -165,7 +168,7 @@ export default function Settings() {
       </Card>
 
       {/* --------------------------------------------------------- Twitch */}
-      <Card>
+      <Card id="twitch">
         <CardHeader
           title="Twitch"
           description="App credentials from dev.twitch.tv/console/apps."
@@ -213,7 +216,7 @@ export default function Settings() {
       </Card>
 
       {/* -------------------------------------------------------- Jellyfin */}
-      <Card>
+      <Card id="jellyfin">
         <CardHeader
           title="Jellyfin"
           description="Used to trigger library scans after JellyTTV writes new episodes."
@@ -280,7 +283,7 @@ export default function Settings() {
       </Card>
 
       {/* ------------------------------------------------- URLs / EventSub */}
-      <Card>
+      <Card id="urls">
         <CardHeader
           title="URLs & go-live detection"
           action={
@@ -316,7 +319,7 @@ export default function Settings() {
                 : 'Polling mode (every 2 min)'}
             </Badge>
             {current.eventsub_callback_url && (
-              <code className="truncate font-mono text-[11px] text-ink-400">
+              <code className="truncate font-mono text-xs text-ink-400">
                 {current.eventsub_callback_url}
               </code>
             )}
@@ -336,7 +339,7 @@ export default function Settings() {
       </Card>
 
       {/* ------------------------------------------------- Notifications */}
-      <Card>
+      <Card id="notifications">
         <CardHeader
           title="Go-live notifications"
           description="Push a notification to your devices when a tracked channel starts streaming. Mute individual channels with the bell on the Channels page."
@@ -391,7 +394,7 @@ export default function Settings() {
       </Card>
 
       {/* ------------------------------------------------ Built-in player */}
-      <Card>
+      <Card id="player">
         <CardHeader
           title="Built-in player"
           description="Watching in JellyTTV itself. Choose between full quality and the 360p ad-free source in the player."
@@ -413,7 +416,7 @@ export default function Settings() {
       </Card>
 
       {/* --------------------------------------------- Streaming behaviour */}
-      <Card>
+      <Card id="streaming">
         <CardHeader title="Streaming (Jellyfin)" description="How stream bytes get from Twitch to Jellyfin." />
         <CardBody className="space-y-1">
           <div className="pb-3">
@@ -525,7 +528,7 @@ export default function Settings() {
       </Card>
 
       {/* ------------------------------------------------- Channel defaults */}
-      <Card>
+      <Card id="defaults">
         <CardHeader title="Defaults for new channels" description="Existing channels keep their own settings." />
         <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="VOD handling">
@@ -573,7 +576,7 @@ export default function Settings() {
       </Card>
 
       {/* ------------------------------------------------------ Diagnostics */}
-      <Card>
+      <Card id="diagnostics">
         <CardHeader title="Diagnostics" description="Paste this into a bug report." />
         <CardBody>
           {diagnostics.data ? (
@@ -623,10 +626,14 @@ export default function Settings() {
         </CardBody>
       </Card>
 
-      <ChangePassword username={current.admin_username ?? 'admin'} />
+          <div id="account" className="scroll-mt-20">
+            <ChangePassword username={current.admin_username ?? 'admin'} />
+          </div>
+        </div>
+      </div>
 
       {dirty && (
-        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur lg:pl-60">
+        <div className="fixed inset-x-0 bottom-0 z-30 border-t border-ink-700 bg-ink-900/95 px-4 py-3 backdrop-blur lg:pl-[var(--sidebar-w)]">
           <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
             <p className="text-xs text-ink-400">You have unsaved changes.</p>
             <div className="flex gap-2">
@@ -647,6 +654,85 @@ export default function Settings() {
         </div>
       )}
     </div>
+  )
+}
+
+const SECTIONS = [
+  { id: 'jellyfin-urls', label: 'Add to Jellyfin' },
+  { id: 'twitch', label: 'Twitch' },
+  { id: 'jellyfin', label: 'Jellyfin' },
+  { id: 'urls', label: 'URLs & go-live' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'player', label: 'Built-in player' },
+  { id: 'streaming', label: 'Streaming' },
+  { id: 'defaults', label: 'Channel defaults' },
+  { id: 'diagnostics', label: 'Diagnostics' },
+  { id: 'account', label: 'Admin account' },
+]
+
+/**
+ * Jump list for a page that is ten stacked cards long.
+ *
+ * A sticky index on wide screens, a jump menu on narrow ones - scrolling a
+ * 700-line form to find the player options was the only way to navigate it.
+ */
+function SectionNav() {
+  const [active, setActive] = useState(SECTIONS[0].id)
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
+        if (visible) setActive(visible.target.id)
+      },
+      // Only count a section as current once it is near the top of the window.
+      { rootMargin: '-80px 0px -70% 0px', threshold: 0 },
+    )
+    for (const section of SECTIONS) {
+      const element = document.getElementById(section.id)
+      if (element) observer.observe(element)
+    }
+    return () => observer.disconnect()
+  }, [])
+
+  const jump = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  return (
+    <>
+      <nav aria-label="Settings sections" className="sticky top-6 hidden xl:block">
+        <ul className="space-y-0.5 text-sm">
+          {SECTIONS.map((section) => (
+            <li key={section.id}>
+              <a
+                href={`#${section.id}`}
+                aria-current={active === section.id ? 'true' : undefined}
+                className={cn(
+                  'block rounded-md px-3 py-1.5 transition-colors',
+                  active === section.id
+                    ? 'bg-twitch-600/15 text-white'
+                    : 'text-ink-400 hover:bg-ink-800 hover:text-ink-200',
+                )}
+              >
+                {section.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+      <div className="mb-4 xl:hidden">
+        <Select value={active} onChange={(event) => jump(event.target.value)} aria-label="Jump to section">
+          {SECTIONS.map((section) => (
+            <option key={section.id} value={section.id}>
+              {section.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+    </>
   )
 }
 

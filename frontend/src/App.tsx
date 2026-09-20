@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useEventStream } from '@/lib/useEvents'
 import { Layout } from '@/components/Layout'
+import { UiStateProvider } from '@/lib/uiState'
 import { Spinner } from '@/components/ui'
 import Dashboard from '@/pages/Dashboard'
 import Channels from '@/pages/Channels'
@@ -53,18 +54,20 @@ export default function App() {
   }
 
   return (
-    <Layout connected={connected} username={session.data?.username ?? null}>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/watch" element={<WatchRoute />} />
-        <Route path="/watch/:login" element={<WatchRoute />} />
-        <Route path="/channels" element={<Channels />} />
-        <Route path="/vods" element={<Vods />} />
-        <Route path="/jobs" element={<Jobs />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Layout>
+    <UiStateProvider>
+      <Layout connected={connected} username={session.data?.username ?? null}>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/watch" element={<WatchRoute />} />
+          <Route path="/watch/:login" element={<WatchRoute />} />
+          <Route path="/channels" element={<Channels />} />
+          <Route path="/vods" element={<Vods />} />
+          <Route path="/jobs" element={<Jobs />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Layout>
+    </UiStateProvider>
   )
 }
 
