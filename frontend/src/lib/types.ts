@@ -34,6 +34,7 @@ export interface Settings {
   notify_on_live: boolean
   notify_title_template: string
   notify_body_template: string
+  direct_playback: boolean
   webpush_enabled: boolean
   web_proxy_segments: boolean
   tuner_token: string | null
@@ -217,6 +218,10 @@ export interface WatchStatus {
   active: boolean
   mode: WatchMode
   in_ad_break: boolean
+  /** The picture currently being served, e.g. "1080p". */
+  resolution?: string | null
+  /** "native", or the player type a backup is coming from. */
+  source?: string | null
   serving_backup?: boolean
   serving_bridge?: boolean
   backup_player_type?: string | null

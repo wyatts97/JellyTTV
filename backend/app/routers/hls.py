@@ -76,6 +76,9 @@ class PlaybackPolicy:
     ad_free_source: bool
     strip_ads: bool
     proxy_segments: bool
+    # Mint playback tokens ourselves instead of spawning streamlink. Fast enough
+    # to cover an ad break, and what removes the cold start on first play.
+    direct_playback: bool
     # Whether a break nothing covers yet is held on our black segment. Off in
     # ad-free mode: nothing should ever be black there (see `_session_playlist`).
     hold: bool
@@ -90,6 +93,7 @@ def policy_from_settings(settings: ResolvedSettings) -> PlaybackPolicy:
         proxy_segments=row.proxy_segments,
         hold=not row.ad_free_source,
         ad_spoofing=row.ad_spoofing,
+        direct_playback=row.direct_playback,
     )
 
 
@@ -201,6 +205,7 @@ def _make_resolver(
                     else settings.row.twitch_player_type
                 ),
                 device_id=settings.twitch_device_id,
+                direct=policy.direct_playback,
                 # Awaited inside the session lock, so a slow streamlink stalls
                 # every poll for this channel - far longer than
                 # PLAYLIST_DEADLINE_SECONDS suggests, because the deadline only
@@ -244,7 +249,10 @@ def _make_backup_finder(
         return None
 
     async def find(
-        state: adblock.BackupState, quality: str, full_quality_only: bool = False
+        state: adblock.BackupState,
+        quality: str,
+        full_quality_only: bool = False,
+        native_url: str | None = None,
     ):
         return await adblock.find_backup(
             login=login,
@@ -257,6 +265,8 @@ def _make_backup_finder(
             user_token=settings.twitch_user_token,
             device_id=settings.twitch_device_id,
             full_quality_only=full_quality_only,
+            # What the session is serving, so the search can match its picture.
+            native_url=native_url,
         )
 
     return find

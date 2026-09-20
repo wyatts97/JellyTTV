@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from app.config import get_config
 from app.logging_conf import get_logger
+from app.services import twitch_playback
 
 log = get_logger(__name__)
 
@@ -276,6 +277,32 @@ def looks_offline(text: str) -> bool:
     return any(marker.lower() in lowered for marker in _OFFLINE_MARKERS)
 
 
+async def _resolve_direct(
+    login: str,
+    quality: str,
+    user_token: str | None,
+    player_type: str | None,
+    device_id: str | None,
+    force: bool,
+) -> str:
+    """Resolve by minting a playback token ourselves. See twitch_playback.
+
+    Milliseconds instead of a streamlink process, which is what makes covering
+    an ad break possible at all, and what removes the cold start on first play.
+    """
+    master = await twitch_playback.master(
+        login,
+        resolve_player_type(player_type),
+        user_token=user_token,
+        device_id=device_id,
+        force=force,
+    )
+    variant = twitch_playback.pick_variant(master.variants, quality=quality)
+    if variant is None:
+        raise twitch_playback.PlaybackError("no playable rendition in the master playlist")
+    return variant.url
+
+
 async def _resolve(
     url: str,
     quality: str,
@@ -283,8 +310,27 @@ async def _resolve(
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     device_id: str | None = None,
+    direct_login: str | None = None,
+    force: bool = False,
 ) -> str:
     errors: list[str] = []
+
+    if direct_login:
+        try:
+            return await _resolve_direct(
+                direct_login, quality, user_token, player_type, device_id, force
+            )
+        except twitch_playback.ChannelOffline as exc:
+            raise ChannelOffline(str(exc)) from exc
+        except twitch_playback.PlaybackError as exc:
+            # Twitch changed something, or the network did. streamlink knows
+            # another way in, so this is a fallback rather than a failure.
+            log.warning(
+                "direct playback resolve failed; falling back to streamlink",
+                login=direct_login,
+                error=str(exc)[:200],
+            )
+            errors.append(f"direct: {exc}")
 
     if shutil.which(STREAMLINK_BIN):
         code, out, err = await _run(
@@ -333,6 +379,7 @@ async def _resolve_cached(
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     device_id: str | None = None,
+    direct_login: str | None = None,
 ) -> str:
     entry = _cache.get(cache_key)
     now = time.time()
@@ -352,7 +399,14 @@ async def _resolve_cached(
         async def work() -> str:
             try:
                 resolved = await _resolve(
-                    url, quality, user_token, player_type, timeout, device_id
+                    url,
+                    quality,
+                    user_token,
+                    player_type,
+                    timeout,
+                    device_id,
+                    direct_login=direct_login,
+                    force=force,
                 )
                 _cache[cache_key] = _Entry(url=resolved, expires_at=time.time() + ttl)
                 return resolved
@@ -395,6 +449,7 @@ async def resolve_live(
     player_type: str | None = None,
     timeout: float = DEFAULT_RESOLVE_TIMEOUT,
     device_id: str | None = None,
+    direct: bool = True,
 ) -> str:
     """Return the upstream media-playlist url for a live channel.
 
@@ -403,6 +458,10 @@ async def resolve_live(
     upstream actually breaks, so the cache is a warm-start aid, not the thing
     keeping streamlink from being respawned. `force=True` bypasses the cache and
     is used by that failure path.
+
+    `direct=False` skips minting the playback token ourselves and goes straight
+    to streamlink - the escape hatch for a Twitch API change, and what the
+    Jellyfin-facing paths that never needed the speed can keep using.
     """
     cfg = get_config()
     return await _resolve_cached(
@@ -415,6 +474,7 @@ async def resolve_live(
         player_type=player_type,
         timeout=timeout,
         device_id=device_id,
+        direct_login=login if direct else None,
     )
 
 

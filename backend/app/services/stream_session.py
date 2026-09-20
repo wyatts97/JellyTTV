@@ -101,7 +101,9 @@ Resolver = Callable[[], Awaitable[str]]
 # bool is `full_quality_only`: set for the upgrade probe that runs behind an
 # active low-quality bridge, which must not settle for a second degraded
 # rendition.
-BackupFinder = Callable[[BackupState, str, bool], Awaitable[BackupCandidate | None]]
+BackupFinder = Callable[
+    [BackupState, str, bool, str | None], Awaitable[BackupCandidate | None]
+]
 
 # Builds the url of our own hold segment for a given sequence number. Injected
 # the same way `rewrite_uri` is, so this module stays free of url shapes.
@@ -135,7 +137,8 @@ def _start_backup_search(
         return
     session.backup.searching = True
     task = asyncio.create_task(
-        backup(session.backup, session.quality, full_quality_only)
+        # The native url tells the search which picture to match.
+        backup(session.backup, session.quality, full_quality_only, session.upstream_url)
     )
     session.backup_task = task
     _backup_tasks.add(task)

@@ -466,7 +466,7 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
             return 200, playlist
         return await native_fetch(url)
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         return stream_session.BackupCandidate(
             player_type="embed",
             quality=quality,
@@ -539,7 +539,7 @@ async def test_the_backup_search_starts_at_the_live_edge_not_at_a_full_pod():
     ]
     searches = {"n": 0}
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
         return stream_session.BackupCandidate(
             player_type="picture-by-picture",
@@ -571,7 +571,7 @@ async def test_a_clean_stream_never_starts_a_backup_search():
     native = [build_playlist(start_seq=100 + 4 * i, count=4) for i in range(5)]
     searches = {"n": 0}
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
         return None
 
@@ -605,7 +605,7 @@ async def test_a_stale_prefetched_candidate_is_dropped_not_spliced():
     ]
     searches = {"n": 0}
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
         # The first verdict is already expired by the time it is wanted; the
         # replacement search returns a fresh one.
@@ -656,7 +656,7 @@ async def test_native_resumes_only_after_several_clean_polls():
             return 200, playlist
         return await native_fetch(url)
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         return stream_session.BackupCandidate(
             player_type="embed", quality=quality, url=backup_url, playlist=""
         )
@@ -967,7 +967,7 @@ async def test_a_low_quality_bridge_is_upgraded_once_it_has_held():
             return 200, playlist
         return await native_fetch(url)
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         if full_quality_only:
             return stream_session.BackupCandidate(
                 player_type="embed", quality=quality, url=full_url, playlist="",
@@ -1016,7 +1016,7 @@ async def test_the_bridge_upgrade_is_capped_per_break():
 
     searches = {"upgrade": 0}
 
-    async def find_backup(state, quality, full_quality_only=False):
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
         if full_quality_only:
             # Nothing better exists - the probe keeps coming back empty.
             searches["upgrade"] += 1

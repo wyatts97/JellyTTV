@@ -60,6 +60,7 @@ class SettingsUpdate(BaseModel):
     # path: Twitch treats an unrecognised playerType as its default.
     twitch_player_type: Literal[PLAYER_TYPES] | None = None  # type: ignore[valid-type]
     ad_spoofing: bool | None = None
+    direct_playback: bool | None = None
     default_quality: str | None = None
     guide_window_hours: int | None = Field(default=None, ge=6, le=336)
 
@@ -103,6 +104,7 @@ class SettingsOut(BaseModel):
     live_delivery: str
     twitch_player_type: str
     ad_spoofing: bool
+    direct_playback: bool
     default_quality: str
     guide_window_hours: int
 
@@ -305,6 +307,7 @@ def settings_out(row: Settings, *, resolved) -> SettingsOut:  # noqa: ANN001
         # pass-through would fail response validation on a non-optional str.
         twitch_player_type=resolve_player_type(row.twitch_player_type),
         ad_spoofing=row.ad_spoofing,
+        direct_playback=row.direct_playback,
         default_quality=row.default_quality,
         guide_window_hours=row.guide_window_hours,
         default_vod_mode=row.default_vod_mode,

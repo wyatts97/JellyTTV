@@ -129,6 +129,11 @@ class Settings(SQLModel, table=True):
     # the additive-migration reason described on `twitch_player_type`; readers
     # coerce through tuner.resolve_live_delivery.
     live_delivery: str | None = "ts"
+    # Mint Twitch playback tokens directly (services.twitch_playback) instead of
+    # spawning streamlink for every resolve. Milliseconds instead of seconds,
+    # which is what lets an ad break be covered before the player notices it.
+    # Turn off to force streamlink everywhere if Twitch changes its API.
+    direct_playback: bool = True
     # Replay ad-progress telemetry for breaks that were blocked. Reports ads as
     # watched that were not; separate from blocking and independently toggleable.
     ad_spoofing: bool = True

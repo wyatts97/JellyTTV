@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk curl *)",
+      "Bash(rtk wc *)"
     ]
   }
 }

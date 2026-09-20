@@ -9,9 +9,10 @@ the never-stitched 360p source only for the length of an ad break.
 
 Two modes, chosen per viewer in the player:
 
-* `bridged` (default) - native quality; an ad break is covered by a clean
-  backup, bridged first by `picture-by-picture`, and held on our black segment
-  only while none has been found yet.
+* `bridged` (default) - native quality; an ad break is covered by a clean copy
+  of the same stream at the *same* resolution where one exists (see
+  services.adblock), by a smaller clean one where it does not, and held on our
+  black segment only while neither has been found.
 * `adfree` - `picture-by-picture` from the start, 360p, nothing to cover.
 
 Every url handed to the browser is root-relative, so it resolves against
@@ -35,7 +36,7 @@ from app.routers import hls as hls_router
 from app.routers.hls import PlaybackPolicy
 from app.security import AdminUser
 from app.services import channels as channel_service
-from app.services import stream_session
+from app.services import stream_session, twitch_playback
 from app.services.settings_store import ResolvedSettings, get_settings
 from app.util import iso_z, utcnow
 
@@ -52,6 +53,7 @@ def web_policy(settings: ResolvedSettings, mode: WatchMode) -> PlaybackPolicy:
         proxy_segments=settings.row.web_proxy_segments,
         hold=not ad_free,
         ad_spoofing=settings.row.ad_spoofing,
+        direct_playback=settings.row.direct_playback,
     )
 
 
@@ -144,10 +146,15 @@ async def live_status(
     in_ad_break = bool(
         snap["serving_backup"] or snap["holding"] or snap["consecutive_ad_polls"] > 0
     )
+    # What picture is actually being served, so the player can say whether the
+    # break cost any quality.
+    variant = twitch_playback.variant_for_url(sess.upstream_url)
     return {
         "active": True,
         "mode": mode,
         "in_ad_break": in_ad_break,
+        "resolution": f"{variant.height}p" if variant and variant.height else None,
+        "source": snap["backup_player_type"] if snap["serving_backup"] else "native",
         "serving_backup": snap["serving_backup"],
         "serving_bridge": snap["serving_bridge"],
         "backup_player_type": snap["backup_player_type"] if snap["serving_backup"] else None,

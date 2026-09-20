@@ -121,14 +121,15 @@ Episode numbers are deterministic — season is the broadcast year, episode is
 ## Watching in the browser
 
 Open **Watch** in the sidebar, or click any live card on the Dashboard. The player gets its
-playlist from JellyTTV, which runs the same ad-detection and backup-source engine as the legacy
-Jellyfin HLS path. The browser fetches the video itself straight from Twitch's CDN, so watching
+playlist from JellyTTV, which detects ads and switches to a clean copy of the stream. JellyTTV asks
+Twitch for playback tokens the same way Twitch's own player does, so finding that clean copy takes
+well under a second and starting a stream no longer waits on a `streamlink` launch. The browser fetches the video itself straight from Twitch's CDN, so watching
 costs your server almost no bandwidth. Turn on *Settings → Built-in player → Stream video through
 JellyTTV* only if the viewing device can't reach Twitch.
 
 | Player source | What you get |
 |---|---|
-| **Best** (default) | The channel's full quality. During an ad break the player switches to a clean copy of the stream, bridged first by Twitch's never-stitched 360p `picture-by-picture` source, then returns to full quality when the break ends. A green *Ad break blocked* badge shows while this is happening. |
+| **Best** (default) | The channel's full quality. During an ad break the player switches to a clean copy of the same stream — at the same resolution and frame rate wherever one exists, so the picture does not change — and switches back when the break ends. A green *Ad break blocked* badge shows while this is happening. |
 | **360p ad-free** | `picture-by-picture` from the start. Capped at 360p, with nothing to switch. |
 
 Shortcuts: <kbd>Space</kbd>/<kbd>K</kbd> play/pause, <kbd>M</kbd> mute, <kbd>F</kbd> fullscreen,

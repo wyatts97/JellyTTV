@@ -322,13 +322,16 @@ container.
 
 ## Built-in player: "Lost connection" or it will not start
 
-- The first play of a channel waits for a streamlink resolve, which can take 5–15 s. The player
-  keeps retrying on its own. If it gives up, *Retry* starts it again.
+- Playback normally starts in well under a second. If it does not, check the logs for
+  `direct playback resolve failed; falling back to streamlink` — Twitch may have changed its API,
+  and JellyTTV is on the slow fallback path (5–15 s per lookup). The player keeps retrying on its
+  own; *Retry* starts it again.
 - Check that the viewing device can reach `*.ttvnw.net`. The browser fetches video directly from
   Twitch's CDN. If that's blocked on your network, turn on *Settings → Built-in player → Stream
   video through JellyTTV*.
 - A green *Ad break blocked — finding a clean source* badge that stays up for the whole break
-  means no clean copy was found for this channel. Switch the player to **360p ad-free**.
+  means no clean copy was found for this channel, and you are watching black filler. Check the logs
+  for `no clean backup found`. Switching the player to **360p ad-free** avoids breaks entirely.
 
 ## Chat does not load next to the player
 

@@ -32,8 +32,19 @@ import { cn } from '@/lib/utils'
  * seeking to the live edge and, if that does not help, rebuilding.
  */
 
-const STALL_NUDGE_MS = 6_000
+// Stall recovery, cheapest first. A pause/play nudge fixes most stalls and is
+// invisible, so it comes early; seeking to the live edge loses whatever was
+// buffered; a rebuild costs a reconnect. Modelled on VAFT's buffering monitor,
+// which samples this often and nudges rather than reloading.
+const STALL_SAMPLE_MS = 500
+const STALL_NUDGE_MS = 1_500
+const STALL_SEEK_MS = 6_000
 const STALL_REBUILD_MS = 15_000
+// A nudge that did not help must not be repeated every sample.
+const STALL_NUDGE_REPEAT_MS = 5_000
+// During a break the source is being switched underneath the player, and a
+// nudge mid-switch fights it. Give a break longer before intervening.
+const AD_BREAK_GRACE_MS = 4_000
 const MAX_NETWORK_RETRIES = 6
 const CONTROLS_HIDE_MS = 3_000
 
@@ -120,6 +131,25 @@ export function LivePlayer({
     enabled: phase === 'playing' || phase === 'buffering',
   })
 
+  // Read by the stall watchdog, which treats a break more patiently than an
+  // ordinary stall: the source is being switched underneath the player.
+  const inAdBreak = useRef(false)
+  const wasInAdBreak = useRef(false)
+  useEffect(() => {
+    const active = status.data?.in_ad_break ?? false
+    inAdBreak.current = active
+    if (wasInAdBreak.current && !active) {
+      // The break is over. Switching sources costs a little latency each time;
+      // if it added up, rejoin the live edge rather than drifting behind.
+      const video = videoRef.current
+      const edge = hlsRef.current?.liveSyncPosition
+      if (video && edge && video.currentTime < edge - LIVE_MAX_LATENCY_SECONDS) {
+        video.currentTime = edge
+      }
+    }
+    wasInAdBreak.current = active
+  }, [status.data?.in_ad_break])
+
   // ------------------------------------------------------------ source setup
   useEffect(() => {
     const video = videoRef.current
@@ -155,6 +185,10 @@ export function LivePlayer({
         liveMaxLatencyDuration: LIVE_MAX_LATENCY_SECONDS,
         maxLiveSyncPlaybackRate: 1.1,
         backBufferLength: 30,
+        // Let hls.js jump the small gaps a source switch can leave before the
+        // watchdog below ever sees them as a stall.
+        maxBufferHole: 0.5,
+        nudgeMaxRetry: 8,
         manifestLoadPolicy: PLAYLIST_POLICY,
         playlistLoadPolicy: PLAYLIST_POLICY,
         // Every url in the playlist is either same-origin (cookie auth) or a
@@ -275,10 +309,18 @@ export function LivePlayer({
   }, [])
 
   // ----------------------------------------------------------- stall watchdog
+  // The clock stopping is the one failure hls.js cannot report: no error fires,
+  // the player simply stops. Escalates only as far as it has to.
   useEffect(() => {
     let lastTime = -1
+    let lastBuffered = -1
     let lastAdvance = Date.now()
-    let nudged = false
+    let lastNudge = 0
+    let seeked = false
+
+    const bufferedEnd = (video: HTMLVideoElement) =>
+      video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0
+
     const timer = window.setInterval(() => {
       const video = videoRef.current
       if (!video) return
@@ -291,24 +333,42 @@ export function LivePlayer({
         lastTime = video.currentTime
         return
       }
-      if (video.currentTime !== lastTime) {
+
+      const buffered = bufferedEnd(video)
+      if (video.currentTime !== lastTime || buffered !== lastBuffered) {
+        // Either the picture or the buffer moved: not stuck.
         lastTime = video.currentTime
+        lastBuffered = buffered
         lastAdvance = Date.now()
-        nudged = false
+        seeked = false
         return
       }
+
       const stuckFor = Date.now() - lastAdvance
-      if (stuckFor > STALL_REBUILD_MS) {
+      const grace = inAdBreak.current ? AD_BREAK_GRACE_MS : 0
+      if (stuckFor > STALL_REBUILD_MS + grace) {
         lastAdvance = Date.now()
-        nudged = false
+        seeked = false
         rebuild()
-      } else if (stuckFor > STALL_NUDGE_MS && !nudged) {
-        nudged = true
-        const edge = hls?.liveSyncPosition ?? (video.seekable.length ? video.seekable.end(video.seekable.length - 1) - 3 : null)
+      } else if (stuckFor > STALL_SEEK_MS + grace && !seeked) {
+        // The nudge did not help: give up the buffer and rejoin at the edge.
+        seeked = true
+        const edge =
+          hls?.liveSyncPosition ??
+          (video.seekable.length ? video.seekable.end(video.seekable.length - 1) - 3 : null)
         if (edge !== null && edge !== undefined && Number.isFinite(edge)) video.currentTime = edge
-        video.play().catch(() => undefined)
+        void video.play().catch(() => undefined)
+      } else if (
+        stuckFor > STALL_NUDGE_MS + grace &&
+        Date.now() - lastNudge > STALL_NUDGE_REPEAT_MS
+      ) {
+        // The cheap fix, and the one that resolves most stalls: a pause/play
+        // makes the browser re-evaluate the buffer without losing it.
+        lastNudge = Date.now()
+        video.pause()
+        void video.play().catch(() => undefined)
       }
-    }, 1_000)
+    }, STALL_SAMPLE_MS)
     return () => window.clearInterval(timer)
   }, [rebuild])
 
@@ -479,9 +539,9 @@ export function LivePlayer({
           <ShieldCheck className="size-3.5" aria-hidden />
           {status.data?.holding
             ? 'Ad break blocked - finding a clean source'
-            : `Ad break blocked - ${status.data?.serving_bridge ? 'ad-free bridge' : 'clean backup'}${
-                status.data?.backup_quality ? ` (${status.data.backup_quality})` : ''
-              }`}
+            : status.data?.serving_bridge
+              ? `Ad break blocked - clean ${status.data?.resolution ?? 'backup'} copy`
+              : 'Ad break blocked - same quality'}
         </div>
       )}
 

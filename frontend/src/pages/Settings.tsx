@@ -398,6 +398,12 @@ export default function Settings() {
         />
         <CardBody className="space-y-1">
           <Toggle
+            checked={Boolean(get('direct_playback'))}
+            onChange={(v) => set('direct_playback', v)}
+            label="Resolve streams directly from Twitch"
+            description="Recommended. Asks Twitch for a playback token the same way its own player does, instead of launching streamlink for every lookup — milliseconds instead of seconds. It is what lets an ad break be covered before you notice it, and what removes the wait when a stream starts. Turn off to force streamlink everywhere if Twitch changes its API and playback starts failing."
+          />
+          <Toggle
             checked={Boolean(get('web_proxy_segments'))}
             onChange={(v) => set('web_proxy_segments', v)}
             label="Stream video through JellyTTV"
