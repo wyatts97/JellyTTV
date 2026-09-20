@@ -129,6 +129,12 @@ class BackupState:
     searching: bool = False
     searches: int = 0
 
+    # Player types caught carrying the ad during the break in progress. Twitch
+    # does not un-insert a pod, so a type that was stitched once stays stitched
+    # for the rest of it: re-promoting it a few seconds later buys a seam and a
+    # run of black, which is what made a single midroll look like the player was
+    # shuffling between streams. Cleared when the break ends.
+    stitched_this_break: set[str] = field(default_factory=set)
     # Set when a whole rotation came back with nothing clean; no new search
     # starts before this.
     exhausted_until: float = 0.0
@@ -140,7 +146,9 @@ class BackupState:
         return [
             pt
             for pt in BACKUP_PLAYER_TYPES
-            if pt != exclude and self.cooldowns.get(pt, 0.0) <= now
+            if pt != exclude
+            and pt not in self.stitched_this_break
+            and self.cooldowns.get(pt, 0.0) <= now
         ]
 
     def penalise(self, player_type: str, reason: str, now: float) -> None:

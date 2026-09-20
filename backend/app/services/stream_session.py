@@ -75,6 +75,14 @@ MAX_CONSECUTIVE_AD_POLLS = 120
 # render cache they advance the window twice per real poll.
 RENDER_CACHE_SECONDS = 1.0
 
+# How many consecutive polls a backup may be *entirely* advertising before it
+# is given up on. A clean copy can catch the pod a few seconds late, which is
+# worth holding through; one that stays in the break for this long is simply in
+# the break too, and rotating is the only thing left.
+MAX_BACKUP_AD_POLLS = 4
+# Consecutive fetch failures before a backup is dropped. One is a hiccup.
+MAX_BACKUP_FAILURES = 2
+
 MIN_RESOLVE_INTERVAL = 5.0
 MAX_CONSECUTIVE_FAILURES = 3
 
@@ -257,6 +265,18 @@ class StreamSession:
     backup_promoted_at: float = 0.0
     bridge_upgrades: int = 0
     upgrade_task: asyncio.Task | None = field(default=None, repr=False)
+
+    # Consecutive polls where the active backup was unusable. A backup is only
+    # given up on when it stays that way: dropping one on its first bad poll is
+    # what turned a single break into a rotation storm, because a fresh token
+    # minted mid-pod is routinely stitched within a second or two of being
+    # promoted, and every drop cost a discontinuity and a run of black.
+    backup_ad_polls: int = 0
+    backup_failures: int = 0
+    # Polls the active backup has actually contributed content on. A backup that
+    # has never delivered anything is not worth holding black for: it was
+    # promoted on a "clean" verdict it no longer honours.
+    backup_served_polls: int = 0
 
     # Sequence counter for our own hold segments. Only ever increases, so each
     # hold gets a distinct uri and the `seen` dedupe map cannot collapse a run
@@ -623,20 +643,28 @@ def _end_hold(session: StreamSession) -> None:
         session.pending_discontinuity = True
 
 
-def _maybe_upgrade_bridge(
-    session: StreamSession, backup: BackupFinder, now: float
+async def _maybe_upgrade_bridge(
+    session: StreamSession,
+    backup: BackupFinder,
+    fetch: Fetcher,
+    now: float,
 ) -> None:
     """Trade up from a low-quality bridge once it has held long enough.
 
-    The fast bridge is `autoplay` at 360p - the quickest thing to come back
-    clean, and the reason a break is covered on the first probe instead of the
-    fourth. It is not what anyone wants to watch for a whole midroll, so once it
-    has carried `BRIDGE_HOLD_SECONDS` a full-quality candidate is looked for
-    behind it, and the swap only happens if one is actually found.
+    A bridge is a preview-tier copy - `autoplay` or `picture-by-picture`, capped
+    at 360p. It is not what anyone wants for a whole midroll, so once it has
+    carried `BRIDGE_HOLD_SECONDS` a full-quality candidate is looked for behind
+    it, and the swap only happens if one is actually found.
 
-    Capped at `MAX_BRIDGE_UPGRADES` per break: each swap is another seam, and
-    past two the seams cost more than the resolution buys. TTV-AB caps the
-    equivalent rotation the same way.
+    The candidate is re-fetched and re-checked *here*, immediately before the
+    swap, and the bridge is kept when that check fails. Promoting first and
+    validating later is what made a failed upgrade so expensive: the unverified
+    candidate replaced a working 360p bridge, `_serve_backup` found the ad in it
+    a moment later, and the session was left with no backup at all - black, a
+    discontinuity and a fresh search, all to escape a picture that was playing
+    perfectly well.
+
+    Capped at `MAX_BRIDGE_UPGRADES` per break: each swap is another seam.
     """
     active = session.backup.active
     if active is None or not active.is_bridge:
@@ -665,6 +693,22 @@ def _maybe_upgrade_bridge(
         session.backup_promoted_at = now
         return
 
+    from app.services import adblock
+
+    status, playlist = await fetch(candidate.url)
+    if status != 200 or not playlist or not adblock.accepts(playlist)[0]:
+        # Clean when probed, stitched by the time it was wanted. Keep the
+        # bridge, and keep this type out of the rest of the break.
+        log.info(
+            "upgrade candidate was already carrying the ad; keeping the bridge",
+            login=session.login,
+            player_type=candidate.player_type,
+        )
+        session.backup.penalise(candidate.player_type, "ad-marked", now)
+        session.backup.stitched_this_break.add(candidate.player_type)
+        session.backup_promoted_at = now
+        return
+
     log.info(
         "upgrading from the low-quality bridge",
         login=session.login,
@@ -674,6 +718,9 @@ def _maybe_upgrade_bridge(
     )
     session.backup.active = candidate
     session.backup_promoted_at = now
+    session.backup_ad_polls = 0
+    session.backup_failures = 0
+    session.backup_served_polls = 0
     session.pending_discontinuity = True
     session.stats.bridge_upgrades += 1
 
@@ -687,6 +734,7 @@ async def _apply_backup(
     fetch: Fetcher,
     rewrite_uri: UriRewriter | None,
     now: float,
+    hold_uri: HoldUri | None = None,
 ) -> bool:
     """Cover an ad break, and never let the ad through.
 
@@ -713,8 +761,8 @@ async def _apply_backup(
         if session.serving_backup:
             session.clean_native_polls += 1
             if session.clean_native_polls < MIN_CLEAN_POLLS_TO_RESUME:
-                _maybe_upgrade_bridge(session, backup, now)
-                return await _serve_backup(session, fetch, rewrite_uri, now)
+                await _maybe_upgrade_bridge(session, backup, fetch, now)
+                return await _serve_backup(session, fetch, rewrite_uri, now, hold_uri)
             log.info(
                 "ad break over; returning to the native stream",
                 login=session.login,
@@ -727,6 +775,11 @@ async def _apply_backup(
             session.upgrade_task = None
             session.backup.clear()
             session.bridge_upgrades = 0
+            session.backup_ad_polls = 0
+            session.backup_failures = 0
+            session.backup_served_polls = 0
+            # The break is over, so the types it stitched are usable again.
+            session.backup.stitched_this_break.clear()
             session.pending_discontinuity = True
         elif ad_incoming and session.backup.active is None:
             # Not in a break yet, but one is arriving - the newest segment is
@@ -779,6 +832,9 @@ async def _apply_backup(
         session.serving_backup = True
         session.backup_promoted_at = now
         session.bridge_upgrades = 0
+        session.backup_ad_polls = 0
+        session.backup_failures = 0
+        session.backup_served_polls = 0
         session.pending_discontinuity = True
         log.info(
             "splicing backup stream over the ad break",
@@ -788,8 +844,8 @@ async def _apply_backup(
             bridge=candidate.is_bridge,
         )
 
-    _maybe_upgrade_bridge(session, backup, now)
-    return await _serve_backup(session, fetch, rewrite_uri, now)
+    await _maybe_upgrade_bridge(session, backup, fetch, now)
+    return await _serve_backup(session, fetch, rewrite_uri, now, hold_uri)
 
 
 async def _serve_backup(
@@ -797,18 +853,27 @@ async def _serve_backup(
     fetch: Fetcher,
     rewrite_uri: UriRewriter | None,
     now: float,
+    hold_uri: HoldUri | None = None,
 ) -> bool:
     """Poll the active backup and fold its newest segments in.
 
-    Returns True when segments were actually folded. Every failure path returns
-    False and drops the backup; the caller then holds (mid-break) or hands the
-    poll back to the native stream (during the hand-back wait). Either way the
-    window is never left unfed.
+    Returns True when the window was fed from here.
 
-    Re-validated on every poll rather than trusted once: a backup can start
-    carrying the ad itself part-way through a break, and TTV-AB re-checks
-    continuously for the same reason. A backup that goes bad is dropped and
-    cooled down so the next poll picks a different player type.
+    A backup is treated exactly like the native stream: its ad segments are
+    replaced by holds rather than making the whole source disposable. That
+    matters because the source is not disposable - it is the one copy of this
+    channel we know was clean moments ago, and the alternatives are a black
+    screen and another search.
+
+    The old rule dropped the backup on its *first* ad-marked poll. During a
+    midroll that fires almost immediately (Twitch stitches the pod into a
+    freshly minted token within a second or two), so a three-minute break became
+    a loop: promote, drop, hold on black, search, promote... Each turn of that
+    loop is a discontinuity, and the player re-buffers on every one.
+
+    Now a backup is only given up on when it stays unusable - `MAX_BACKUP_AD_POLLS`
+    fully-advertising polls, or `MAX_BACKUP_FAILURES` failed fetches - and the
+    type that failed is then kept out of the rotation for the rest of the break.
     """
     active = session.backup.active
     if active is None:
@@ -816,38 +881,82 @@ async def _serve_backup(
 
     status, playlist = await fetch(active.url)
     if status != 200 or not playlist:
-        session.backup.penalise(active.player_type, "error", now)
-        session.backup.clear()
-        session.serving_backup = False
+        session.backup_failures += 1
+        if session.backup_failures >= MAX_BACKUP_FAILURES:
+            _drop_backup(session, active, "error", now)
         return False
-
-    from app.services import adblock
-
-    ok, reason = adblock.accepts(playlist)
-    if not ok:
-        log.info(
-            "backup stream went bad; rotating",
-            login=session.login,
-            player_type=active.player_type,
-            reason=reason,
-        )
-        session.backup.penalise(active.player_type, reason, now)
-        session.backup.clear()
-        session.serving_backup = False
-        return False
+    session.backup_failures = 0
 
     parsed = hls.parse_media_playlist(
         playlist, active.url, strip_ads=True, now=now, trust_titles=session.trust_titles
     )
     if not parsed.segments:
-        session.backup.penalise(active.player_type, "not-playable", now)
-        session.backup.clear()
-        session.serving_backup = False
+        session.backup_failures += 1
+        if session.backup_failures >= MAX_BACKUP_FAILURES:
+            _drop_backup(session, active, "not-playable", now)
         return False
 
-    _advance(session, parsed, strip_ads=True, rewrite_uri=rewrite_uri, now=now)
+    all_ad = all(seg.is_ad for seg in parsed.segments)
+    if all_ad:
+        session.backup_ad_polls += 1
+        # A backup that has served real content is worth holding through a pod -
+        # it may be a few seconds behind the break and come back. One that has
+        # never served anything was stitched before it was ever used, so there is
+        # nothing to wait for: drop it now rather than showing black for ten
+        # seconds first. With no hold segment there is nothing to cover it with
+        # either way.
+        spent = (
+            session.backup_served_polls == 0
+            or session.backup_ad_polls >= MAX_BACKUP_AD_POLLS
+            or hold_uri is None
+        )
+        if spent:
+            log.info(
+                "backup stream is carrying the ad too; rotating",
+                login=session.login,
+                player_type=active.player_type,
+                ad_polls=session.backup_ad_polls,
+                served_polls=session.backup_served_polls,
+            )
+            _drop_backup(session, active, "ad-marked", now)
+            return False
+    else:
+        session.backup_ad_polls = 0
+        session.backup_served_polls += 1
+
+    # `hold_uri` makes `_advance` substitute holds for the ad segments instead
+    # of dropping them, so the timeline keeps moving either way.
+    _advance(
+        session,
+        parsed,
+        strip_ads=True,
+        rewrite_uri=rewrite_uri,
+        now=now,
+        hold_uri=hold_uri,
+    )
     session.stats.backup_polls += 1
     return True
+
+
+def _drop_backup(
+    session: StreamSession, active: BackupCandidate, reason: str, now: float
+) -> None:
+    """Give up on the active backup and keep its player type out of this break.
+
+    A type that was stitched once during a pod is stitched for the rest of it -
+    Twitch does not un-insert an ad break - so re-promoting it a few seconds
+    later only buys another seam and another run of black. `COOLDOWNS` alone was
+    too short for a three-minute midroll, which is why `embed` and `popout` were
+    each promoted and dropped half a dozen times per break.
+    """
+    session.backup.penalise(active.player_type, reason, now)
+    if reason == "ad-marked":
+        session.backup.stitched_this_break.add(active.player_type)
+    session.backup.clear()
+    session.serving_backup = False
+    session.backup_ad_polls = 0
+    session.backup_failures = 0
+    session.backup_served_polls = 0
 
 
 def _render(session: StreamSession) -> PlaylistRender:
@@ -1102,6 +1211,7 @@ async def get_playlist(
                 fetch=fetch,
                 rewrite_uri=rewrite_uri,
                 now=now,
+                hold_uri=hold_uri,
             )
         if served_backup:
             _end_hold(session)

@@ -1043,3 +1043,172 @@ async def test_the_bridge_upgrade_is_capped_per_break():
         "the upgrade probe kept firing for the whole break"
     )
     assert session.serving_backup is True, "the bridge was dropped instead of held"
+
+
+# ----------------------------------------------- staying on one backup source
+AD_MARKED_BACKUP = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:{seq}
+#EXT-X-DATERANGE:ID="stitched-ad-{seq}",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z"
+#EXTINF:2.000,
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq}.ts
+#EXTINF:2.000,
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq2}.ts
+"""
+
+
+async def test_a_backup_that_catches_the_ad_is_held_through_not_thrown_away():
+    """The rotation storm that made a three-minute break unwatchable.
+
+    A token minted mid-pod is routinely stitched a second or two after it is
+    promoted. Dropping the backup on that first ad-marked poll meant: black, a
+    discontinuity, another search, another promotion - roughly every four
+    seconds for the length of the break, which is what the player showed as
+    shuffling between streams and freezing.
+
+    A backup is now treated like the native stream: its ad segments are replaced
+    by holds and the source is kept.
+    """
+    native = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(5)
+    ]
+    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
+    backup_seq = {"n": 200}
+    native_fetch, _ = make_fetch(native)
+    polls = {"n": 0}
+
+    async def fetch(url: str):
+        if url == backup_url:
+            polls["n"] += 1
+            seq = backup_seq["n"]
+            backup_seq["n"] += 4
+            # Clean when promoted, stitched on the next two polls, clean again.
+            if polls["n"] in (2, 3):
+                return 200, AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
+            return 200, build_backup_playlist(start_seq=seq)
+        return await native_fetch(url)
+
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        searches["n"] += 1
+        return stream_session.BackupCandidate(
+            player_type="embed", quality=quality, url=backup_url, playlist="",
+        )
+
+    resolve, _ = make_resolve()
+    for _ in native:
+        await stream_session.get_playlist(
+            login="adapt", quality="best", strip_ads=True,
+            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        await asyncio.sleep(0)
+
+    session = stream_session.get("adapt", "best")
+    assert session.backup.active is not None, "the backup was thrown away over one ad poll"
+    assert session.backup.active.player_type == "embed"
+    assert "embed" not in session.backup.stitched_this_break
+    assert searches["n"] == 1, f"the break re-searched {searches['n']} times"
+
+
+async def test_a_backup_stuck_in_the_break_is_eventually_rotated_away():
+    """Held through, but not forever: a copy that is simply in the break too."""
+    native = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(8)
+    ]
+    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
+    backup_seq = {"n": 200}
+    native_fetch, _ = make_fetch(native)
+
+    async def fetch(url: str):
+        if url == backup_url:
+            seq = backup_seq["n"]
+            backup_seq["n"] += 4
+            return 200, AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
+        return await native_fetch(url)
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        if "embed" in state.stitched_this_break:
+            return None
+        return stream_session.BackupCandidate(
+            player_type="embed", quality=quality, url=backup_url, playlist="",
+        )
+
+    resolve, _ = make_resolve()
+    for _ in native:
+        await stream_session.get_playlist(
+            login="adapt", quality="best", strip_ads=True,
+            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        await asyncio.sleep(0)
+
+    session = stream_session.get("adapt", "best")
+    assert session.backup.active is None, "a permanently stitched backup was kept"
+    # ...and it stays out of the rotation for the rest of the break, rather than
+    # being promoted again a few seconds later.
+    assert "embed" in session.backup.stitched_this_break
+    assert "embed" not in session.backup.available_types(exclude=None, now=1e9)
+
+
+async def test_a_failed_upgrade_keeps_the_bridge_it_was_trying_to_replace():
+    """Losing a working picture to an unverified candidate.
+
+    The upgrade used to promote first and validate later: the candidate replaced
+    the bridge, `_serve_backup` found the ad in it on the next poll, and the
+    session was left with no backup at all. The bridge that was playing fine is
+    what the viewer lost - to black.
+    """
+    native = [build_playlist(start_seq=100, count=4)] + [
+        build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
+        for i in range(6)
+    ]
+    bridge_url = "https://video-weaver.b.hls.ttvnw.net/bridge.m3u8"
+    full_url = "https://video-weaver.c.hls.ttvnw.net/full.m3u8"
+    backup_seq = {"n": 200}
+    native_fetch, _ = make_fetch(native)
+
+    async def fetch(url: str):
+        if url == full_url:
+            # Clean when probed, stitched by the time the swap wants it.
+            return 200, AD_MARKED_BACKUP.format(seq=900, seq2=901)
+        if url == bridge_url:
+            playlist = build_backup_playlist(start_seq=backup_seq["n"])
+            backup_seq["n"] += 4
+            return 200, playlist
+        return await native_fetch(url)
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        if full_quality_only:
+            return stream_session.BackupCandidate(
+                player_type="embed", quality=quality, url=full_url, playlist="",
+                is_bridge=False,
+            )
+        return stream_session.BackupCandidate(
+            player_type="autoplay", quality="360p", url=bridge_url, playlist="",
+            is_bridge=True,
+        )
+
+    resolve, _ = make_resolve()
+    for _ in native:
+        await stream_session.get_playlist(
+            login="adapt", quality="best", strip_ads=True,
+            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        if session.backup_promoted_at:
+            session.backup_promoted_at -= stream_session.BRIDGE_HOLD_SECONDS
+        await asyncio.sleep(0)
+
+    session = stream_session.get("adapt", "best")
+    assert session.backup.active is not None, "the bridge was lost to a bad upgrade"
+    assert session.backup.active.player_type == "autoplay"
+    assert session.stats.bridge_upgrades == 0, "an ad-marked candidate was promoted"
+    assert "embed" in session.backup.stitched_this_break
