@@ -98,10 +98,10 @@ EXHAUSTED_COOLDOWN = 5.0
 # moments later - which is exactly what happens when a search is started early,
 # before the break has filled the window.
 #
-# Increased from 8s to 20s: the prefetch can find a candidate well before the
+# Increased from 8s to 45s: the prefetch can find a candidate well before the
 # break needs it (ad_incoming triggers search while content remains), and a
 # shorter TTL caused stale drops mid-break, forcing a re-search and a hold.
-CANDIDATE_STALE_SECONDS = 20.0
+CANDIDATE_STALE_SECONDS = 45.0
 
 # Consecutive clean polls of the native stream before switching back. Matches
 # TTV-AB's AD_END_MIN_CLEAN_PLAYLISTS: one clean poll is routinely a gap between

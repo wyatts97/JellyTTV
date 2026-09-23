@@ -100,7 +100,7 @@ SESSION_MAX_SECONDS = 6 * 60 * 60
 # Persistent backup pool: proactively maintain warm clean candidates for active
 # sessions so a break is covered instantly without waiting for a search.
 BACKUP_POOL_INTERVAL = 15.0          # How often to refresh the pool
-BACKUP_POOL_MAX_AGE = 30.0           # Max age of a pooled candidate before refresh
+BACKUP_POOL_MAX_AGE = 45.0           # Max age of a pooled candidate before refresh (match CANDIDATE_STALE_SECONDS)
 BACKUP_POOL_MAX_PER_SESSION = 3      # Max candidates to keep per session
 
 # Upstream statuses that mean "this weaver URL is dead, get a new one".
@@ -835,11 +835,11 @@ async def _apply_backup(
         # This eliminates search latency at the start of a break.
         candidate = None
         if session.backup_pool:
-            # Validate pooled candidates are still fresh and clean.
+            # Re-validate pooled candidates: fetch and check if clean.
+            # We don't discard based on staleness alone - a "stale" candidate
+            # might still be clean, and using it is better than a hold segment.
             valid_pool = []
             for pooled in session.backup_pool:
-                if pooled.is_stale(now):
-                    continue
                 status, playlist = await fetch(pooled.url)
                 if status == 200 and playlist and adblock_accepts(playlist)[0]:
                     valid_pool.append(pooled)
@@ -858,24 +858,21 @@ async def _apply_backup(
             # look like a dead channel. Start one, hold the picture meanwhile, and
             # pick the result up on a later poll.
             candidate = _take_backup_result(session)
-            if candidate is not None and candidate.is_stale(now):
-                # Found before the break needed it - by the prefetch above - and old
-                # enough that "clean" no longer means anything. Promoting it anyway
-                # costs more than dropping it: `_serve_backup` would re-validate,
-                # find the ad, and cool this player type down as ad-marked for the
-                # rest of the break, which throws away the type most likely to come
-                # back clean on the strength of a stale verdict.
-                #
-                # So it is discarded *without* a penalty and the search restarted.
-                # That is exactly the behaviour before the prefetch existed: hold
-                # this poll, splice on the next one.
-                log.info(
-                    "discarding a stale backup candidate; searching again",
-                    login=session.login,
-                    player_type=candidate.player_type,
-                    age=round(now - candidate.found_at, 1),
-                )
-                candidate = None
+            if candidate is not None:
+                # Re-validate the candidate instead of discarding based on staleness.
+                # A "stale" candidate might still be clean, and using it is better
+                # than a hold segment. `_serve_backup` will also re-validate on each poll.
+                status, playlist = await fetch(candidate.url)
+                ok, reason = adblock_accepts(playlist) if (status == 200 and playlist) else (False, "fetch-failed")
+                if not ok:
+                    log.info(
+                        "discarding backup candidate (no longer clean)",
+                        login=session.login,
+                        player_type=candidate.player_type,
+                        age=round(now - candidate.found_at, 1),
+                        reason=reason,
+                    )
+                    candidate = None
             if candidate is None:
                 # Nothing to splice yet; the caller holds this poll and picks the
                 # result up on a later one.

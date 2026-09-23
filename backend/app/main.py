@@ -58,12 +58,15 @@ async def lifespan(app: FastAPI):
         defer_seconds=15,
     )
     sweeper = asyncio.create_task(stream_session.sweeper_task())
+    backup_pool = asyncio.create_task(stream_session.backup_pool_task())
     try:
         yield
     finally:
         sweeper.cancel()
+        backup_pool.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+            await backup_pool
         await shared_http.aclose()
         await close_pool()
         await close_redis()
