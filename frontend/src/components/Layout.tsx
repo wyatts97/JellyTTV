@@ -216,9 +216,11 @@ function Nav({ rail }: { rail?: boolean }) {
 function Brand({ compact, rail }: { compact?: boolean; rail?: boolean }) {
   return (
     <div className={cn('flex items-center gap-2.5', rail && 'justify-center')}>
-      <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-twitch-500 to-jelly-500 text-sm font-bold text-white">
-        J
-      </span>
+      <img
+        src="/icon-192.png"
+        alt="JellyTTV"
+        className="size-8 shrink-0 rounded-lg"
+      />
       {!compact && !rail && (
         <div className="leading-tight">
           <p className="text-sm font-semibold text-white">JellyTTV</p>

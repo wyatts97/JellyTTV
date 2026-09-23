@@ -553,15 +553,11 @@ export function LivePlayer({
         </button>
       )}
 
-      {/* Ad-break pill */}
+{/* Ad-break pill */}
       {adBreak && phase !== 'error' && (
         <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-emerald-600/85 px-3 py-1 text-xs font-medium text-white shadow backdrop-blur">
           <ShieldCheck className="size-3.5" aria-hidden />
-          {status.data?.holding
-            ? 'Ad break blocked - finding a clean source'
-            : status.data?.serving_bridge
-              ? `Ad break blocked - clean ${status.data?.resolution ?? 'backup'} copy`
-              : 'Ad break blocked - same quality'}
+          Hiding ads
         </div>
       )}
 
