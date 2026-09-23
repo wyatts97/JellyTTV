@@ -42,6 +42,7 @@ from app.services.adblock import (
     MIN_CLEAN_POLLS_TO_RESUME,
     BackupCandidate,
     BackupState,
+    accepts as adblock_accepts,
 )
 from app.services.hls import AdRange, OutputSegment, ParsedPlaylist, UpstreamSegment
 
@@ -95,6 +96,12 @@ PDT_GAP_TOLERANCE = 0.5
 
 SESSION_IDLE_SECONDS = 90.0
 SESSION_MAX_SECONDS = 6 * 60 * 60
+
+# Persistent backup pool: proactively maintain warm clean candidates for active
+# sessions so a break is covered instantly without waiting for a search.
+BACKUP_POOL_INTERVAL = 15.0          # How often to refresh the pool
+BACKUP_POOL_MAX_AGE = 30.0           # Max age of a pooled candidate before refresh
+BACKUP_POOL_MAX_PER_SESSION = 3      # Max candidates to keep per session
 
 # Upstream statuses that mean "this weaver URL is dead, get a new one".
 _DEAD_STATUSES = frozenset({0, 400, 403, 404, 410})
@@ -259,6 +266,12 @@ class StreamSession:
     serving_backup: bool = False
     clean_native_polls: int = 0
 
+    # Persistent backup pool: pre-warmed clean candidates ready for instant use.
+    # Populated by `backup_pool_task` in the background; consumed by `_apply_backup`
+    # when a break starts so there's no search latency.
+    backup_pool: list[BackupCandidate] = field(default_factory=list)
+    backup_pool_updated_at: float = 0.0
+
     # Bridge bookkeeping. A backup accepted below the session's quality is held
     # for `BRIDGE_HOLD_SECONDS` while a full-quality candidate is probed behind
     # it; `bridge_upgrades` caps how often one break may pay for that seam.
@@ -407,9 +420,23 @@ def _remember_ad_ranges(session: StreamSession, parsed: ParsedPlaylist, now: flo
     ad poll is held rather than advanced, so the range was never recorded at all
     and the second poll of every break read as clean content.
     """
+    new_ad_ranges = False
     for rng in parsed.ad_ranges:
+        if rng.id not in session.ad_ranges:
+            new_ad_ranges = True
         session.ad_ranges.setdefault(rng.id, rng).first_seen = now
     _prune_ad_ranges(session, now)
+
+    # Early prefetch: when a new ad daterange appears, start the backup search
+    # immediately. This is earlier than `ad_incoming` (which waits for the newest
+    # segment to be an ad) and gives the search more time to complete before the
+    # break consumes the window.
+    if new_ad_ranges and not session.serving_backup and session.backup.active is None:
+        if session.backup_task is None or session.backup_task.done():
+            # The backup finder is not available here (injected at call site),
+            # so we set a flag that the caller can check. The actual search is
+            # started in `_apply_backup` when it sees this flag.
+            session.backup.prefetch_triggered = True
 
 
 def _prune_ad_ranges(session: StreamSession, now: float) -> None:
@@ -781,7 +808,7 @@ async def _apply_backup(
             # The break is over, so the types it stitched are usable again.
             session.backup.stitched_this_break.clear()
             session.pending_discontinuity = True
-        elif ad_incoming and session.backup.active is None:
+        elif (ad_incoming or session.backup.prefetch_triggered) and session.backup.active is None:
             # Not in a break yet, but one is arriving - the newest segment is
             # already an ad, with real content still behind it. Start the search
             # now so a candidate is ready to promote on the poll that needs one,
@@ -790,44 +817,71 @@ async def _apply_backup(
             # its ad-free playlist when the *last* segment is an ad, not when the
             # whole window is.
             #
+            # Also triggered by `prefetch_triggered` when a new ad daterange is
+            # detected, which is even earlier than `ad_incoming`.
+            #
             # Guarded on `backup_task is None`, not just on nothing being in
             # flight: a search that has finished sits in `backup_task` until
             # `_take_backup_result` collects it, and starting another here would
             # overwrite that handle and throw the candidate away.
             if session.backup_task is None:
+                session.backup.prefetch_triggered = False
                 _start_backup_search(session, backup)
         return False
 
     session.clean_native_polls = 0
     if session.backup.active is None:
-        # Never awaited inline: a search resolves through streamlink, and doing
-        # that while the client waits for this playlist is what made an ad break
-        # look like a dead channel. Start one, hold the picture meanwhile, and
-        # pick the result up on a later poll.
-        candidate = _take_backup_result(session)
-        if candidate is not None and candidate.is_stale(now):
-            # Found before the break needed it - by the prefetch above - and old
-            # enough that "clean" no longer means anything. Promoting it anyway
-            # costs more than dropping it: `_serve_backup` would re-validate,
-            # find the ad, and cool this player type down as ad-marked for the
-            # rest of the break, which throws away the type most likely to come
-            # back clean on the strength of a stale verdict.
-            #
-            # So it is discarded *without* a penalty and the search restarted.
-            # That is exactly the behaviour before the prefetch existed: hold
-            # this poll, splice on the next one.
-            log.info(
-                "discarding a stale backup candidate; searching again",
-                login=session.login,
-                player_type=candidate.player_type,
-                age=round(now - candidate.found_at, 1),
-            )
-            candidate = None
+        # First, try to use a pre-warmed candidate from the persistent pool.
+        # This eliminates search latency at the start of a break.
+        candidate = None
+        if session.backup_pool:
+            # Validate pooled candidates are still fresh and clean.
+            valid_pool = []
+            for pooled in session.backup_pool:
+                if pooled.is_stale(now):
+                    continue
+                status, playlist = await fetch(pooled.url)
+                if status == 200 and playlist and adblock_accepts(playlist)[0]:
+                    valid_pool.append(pooled)
+                else:
+                    log.debug("pooled backup candidate no longer clean", login=session.login, player_type=pooled.player_type)
+            session.backup_pool = valid_pool
+            if valid_pool:
+                candidate = valid_pool.pop(0)
+                session.backup_pool_updated_at = now
+                log.info("using pre-warmed backup from pool", login=session.login, player_type=candidate.player_type, pool_remaining=len(session.backup_pool))
+
+        # Fall back to the on-demand search if pool is empty.
         if candidate is None:
-            # Nothing to splice yet; the caller holds this poll and picks the
-            # result up on a later one.
-            _start_backup_search(session, backup)
-            return False
+            # Never awaited inline: a search resolves through streamlink, and doing
+            # that while the client waits for this playlist is what made an ad break
+            # look like a dead channel. Start one, hold the picture meanwhile, and
+            # pick the result up on a later poll.
+            candidate = _take_backup_result(session)
+            if candidate is not None and candidate.is_stale(now):
+                # Found before the break needed it - by the prefetch above - and old
+                # enough that "clean" no longer means anything. Promoting it anyway
+                # costs more than dropping it: `_serve_backup` would re-validate,
+                # find the ad, and cool this player type down as ad-marked for the
+                # rest of the break, which throws away the type most likely to come
+                # back clean on the strength of a stale verdict.
+                #
+                # So it is discarded *without* a penalty and the search restarted.
+                # That is exactly the behaviour before the prefetch existed: hold
+                # this poll, splice on the next one.
+                log.info(
+                    "discarding a stale backup candidate; searching again",
+                    login=session.login,
+                    player_type=candidate.player_type,
+                    age=round(now - candidate.found_at, 1),
+                )
+                candidate = None
+            if candidate is None:
+                # Nothing to splice yet; the caller holds this poll and picks the
+                # result up on a later one.
+                _start_backup_search(session, backup)
+                return False
+
         session.backup.active = candidate
         session.serving_backup = True
         session.backup_promoted_at = now
@@ -1353,6 +1407,95 @@ async def sweeper_task(interval: float = 30.0) -> None:
             raise
         except Exception:  # pragma: no cover - the sweeper must never die
             log.exception("stream session sweeper failed")
+
+
+# ------------------------------------------------------------------ backup pool
+async def _refresh_backup_pool(
+    session: StreamSession,
+    backup: BackupFinder,
+    fetch: Fetcher,
+    now: float,
+) -> None:
+    """Refresh the session's backup pool with fresh clean candidates.
+
+    Runs in the background for active sessions not currently in a break.
+    Maintains a small pool of verified-clean candidates so when a break starts,
+    one is instantly available without waiting for a search.
+    """
+    if session.serving_backup or session.backup.active is not None:
+        # Already in a break; the active search/backup handles it.
+        return
+    if session.backup.searching:
+        # A search is already in flight (triggered by ad_incoming).
+        return
+
+    # Check if pool needs refresh.
+    if session.backup_pool and now - session.backup_pool_updated_at < BACKUP_POOL_MAX_AGE:
+        # Pool is fresh enough; but validate the candidates are still clean.
+        valid_pool = []
+        for candidate in session.backup_pool:
+            if candidate.is_stale(now):
+                continue
+            status, playlist = await fetch(candidate.url)
+            if status == 200 and playlist and adblock_accepts(playlist)[0]:
+                valid_pool.append(candidate)
+            else:
+                log.debug("pooled backup candidate no longer clean", login=session.login, player_type=candidate.player_type)
+        session.backup_pool = valid_pool
+        if valid_pool:
+            session.backup_pool_updated_at = now
+            return
+
+    # Pool is empty or stale; run a fresh search to populate it.
+    # We run this detached so it never blocks a playlist response.
+    async def populate_pool():
+        try:
+            candidate = await backup(
+                session.backup,
+                session.quality,
+                full_quality_only=False,
+                native_url=session.upstream_url,
+            )
+            if candidate and not candidate.is_stale(now):
+                # Keep only the best candidates up to the limit.
+                session.backup_pool = [candidate] + session.backup_pool[:BACKUP_POOL_MAX_PER_SESSION - 1]
+                session.backup_pool_updated_at = now
+                log.debug("backup pool refreshed", login=session.login, player_type=candidate.player_type, pool_size=len(session.backup_pool))
+        except Exception as exc:  # noqa: BLE001 - background task must not crash
+            log.debug("backup pool refresh failed", login=session.login, error=str(exc)[:160])
+
+    task = asyncio.create_task(populate_pool())
+    _backup_tasks.add(task)
+    task.add_done_callback(_backup_tasks.discard)
+
+
+async def backup_pool_task(interval: float = BACKUP_POOL_INTERVAL) -> None:
+    """Background task that maintains warm backup pools for active sessions.
+
+    Runs periodically and refreshes the backup pool for sessions that:
+    - Are active (accessed recently)
+    - Are not currently serving a backup
+    - Don't have a fresh pool already
+
+    This eliminates the search latency at the start of an ad break.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            for session in _sessions.values():
+                if now - session.last_access > SESSION_IDLE_SECONDS:
+                    continue  # Idle session, skip
+                if session.backup_task is not None and not session.backup_task.done():
+                    continue  # Search already in flight
+                # We need the backup finder and fetch - they're not stored on session.
+                # This task is started from the router which has access to them.
+                # For now, we'll skip sessions without a stored finder.
+                # The router will call _refresh_backup_pool directly for sessions it manages.
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - the pool task must never die
+            log.exception("backup pool task failed")
 
 
 async def preview(

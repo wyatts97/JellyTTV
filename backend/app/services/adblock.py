@@ -61,14 +61,18 @@ LOW_QUALITY_PLAYER_TYPES = frozenset({"autoplay", "picture-by-picture"})
 FAST_BRIDGE_TYPE = "picture-by-picture"
 FAST_BRIDGE_QUALITY = "360p"
 # How long a degraded bridge is held before looking for full quality behind it.
-BRIDGE_HOLD_SECONDS = 8.0
+# Increased from 8s to 15s: a working low-quality bridge was being upgraded
+# too aggressively; failed upgrade probes left the session with no backup.
+BRIDGE_HOLD_SECONDS = 15.0
 # How many times one break may rotate off a bridge in search of full quality.
 MAX_BRIDGE_UPGRADES = 2
 
 # The whole rotation now runs concurrently, so it is bounded by one deadline
 # rather than by attempts. Comfortably inside the router's
 # PLAYLIST_DEADLINE_SECONDS, and far inside a poll interval.
-SEARCH_DEADLINE_SECONDS = 2.5
+# Increased from 2.5s to 5s: slow network/Twitch responses were timing out,
+# causing the search to return None and the session to hold (black screen).
+SEARCH_DEADLINE_SECONDS = 5.0
 
 # How long a player type stays out of the rotation after failing, by reason.
 # An ad-marked type is likely to stay ad-marked for the length of the pod, so it
@@ -93,7 +97,11 @@ EXHAUSTED_COOLDOWN = 5.0
 # about as fast: the same player type can be clean when probed and stitched
 # moments later - which is exactly what happens when a search is started early,
 # before the break has filled the window.
-CANDIDATE_STALE_SECONDS = 8.0
+#
+# Increased from 8s to 20s: the prefetch can find a candidate well before the
+# break needs it (ad_incoming triggers search while content remains), and a
+# shorter TTL caused stale drops mid-break, forcing a re-search and a hold.
+CANDIDATE_STALE_SECONDS = 20.0
 
 # Consecutive clean polls of the native stream before switching back. Matches
 # TTV-AB's AD_END_MIN_CLEAN_PLAYLISTS: one clean poll is routinely a gap between
@@ -128,6 +136,9 @@ class BackupState:
     cooldowns: dict[str, float] = field(default_factory=dict)
     searching: bool = False
     searches: int = 0
+    # Set when a new ad daterange is detected, triggering an early backup search
+    # before the break consumes the window. Cleared when the search starts.
+    prefetch_triggered: bool = False
 
     # Player types caught carrying the ad during the break in progress. Twitch
     # does not un-insert a pod, so a type that was stitched once stays stitched
@@ -161,6 +172,7 @@ class BackupState:
 
     def clear(self) -> None:
         self.active = None
+        self.prefetch_triggered = False
 
 
 def is_playable(playlist: str) -> bool:

@@ -16,6 +16,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -30,6 +31,7 @@ from app.db import get_db
 from app.logging_conf import get_logger
 from app.security import require_tuner_token
 from app.services import ad_events, adblock, hls, resolver, stream_session
+from app.services.stream_session import _refresh_backup_pool
 from app.services import channels as channel_service
 from app.services import http as shared_http
 from app.services.http import UPSTREAM_HEADERS
@@ -448,6 +450,12 @@ async def _session_playlist(
     sess = stream_session.get(login, quality, variant)
     if sess is not None:
         sess.is_master = False
+        # Refresh the backup pool for this session if not in a break.
+        # This runs in the background and doesn't block the response.
+        if policy.strip_ads and not policy.ad_free_source:
+            backup_finder = _make_backup_finder(login, settings, policy)
+            if backup_finder is not None and not sess.serving_backup and sess.backup.active is None:
+                asyncio.create_task(_refresh_backup_pool(sess, backup_finder, _fetch_playlist, time.monotonic()))
 
     if render.removed_segments:
         log.info(
