@@ -15,8 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import functools
 import hashlib
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -24,14 +24,13 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_db
 from app.logging_conf import get_logger
 from app.security import require_tuner_token
 from app.services import ad_events, adblock, hls, resolver, stream_session
-from app.services.stream_session import _refresh_backup_pool
 from app.services import channels as channel_service
 from app.services import http as shared_http
 from app.services.http import UPSTREAM_HEADERS
@@ -450,12 +449,6 @@ async def _session_playlist(
     sess = stream_session.get(login, quality, variant)
     if sess is not None:
         sess.is_master = False
-        # Refresh the backup pool for this session if not in a break.
-        # This runs in the background and doesn't block the response.
-        if policy.strip_ads and not policy.ad_free_source:
-            backup_finder = _make_backup_finder(login, settings, policy)
-            if backup_finder is not None and not sess.serving_backup and sess.backup.active is None:
-                asyncio.create_task(_refresh_backup_pool(sess, backup_finder, _fetch_playlist, time.monotonic()))
 
     if render.removed_segments:
         log.info(
@@ -556,19 +549,91 @@ async def proxy_segment(url: str) -> Response:
 
 
 @router.api_route("/hls/{login}/hold", methods=["GET", "HEAD"], include_in_schema=False)
-async def hold_segment(login: str, request: Request) -> Response:
-    return serve_hold(login)
+async def hold_segment(login: str, seq: Annotated[int, Query(ge=0)] = 0) -> Response:
+    return serve_hold(login, seq)
 
 
-def serve_hold(login: str) -> Response:
+_PTS_WRAP = 1 << 33
+# 90kHz ticks per hold, matching the duration the playlist declares for it.
+_HOLD_TICKS = round(stream_session.HOLD_SEGMENT_SECONDS * 90_000)
+
+
+@functools.cache
+def _hold_bytes() -> bytes:
+    return HOLD_SEGMENT_PATH.read_bytes()
+
+
+def _shift_timestamp(buf: bytearray, pos: int, ticks: int) -> None:
+    """Add `ticks` to the 33-bit PES timestamp at `pos`, keeping its marker bits."""
+    value = (
+        ((buf[pos] >> 1) & 0x07) << 30
+        | buf[pos + 1] << 22
+        | ((buf[pos + 2] >> 1) & 0x7F) << 15
+        | buf[pos + 3] << 7
+        | ((buf[pos + 4] >> 1) & 0x7F)
+    )
+    value = (value + ticks) % _PTS_WRAP
+    buf[pos] = (buf[pos] & 0xF1) | ((value >> 29) & 0x0E)
+    buf[pos + 1] = (value >> 22) & 0xFF
+    buf[pos + 2] = ((value >> 14) & 0xFE) | 0x01
+    buf[pos + 3] = (value >> 7) & 0xFF
+    buf[pos + 4] = ((value << 1) & 0xFE) | 0x01
+
+
+def retime_ts(data: bytes, ticks: int) -> bytes:
+    """Shift every PTS, DTS and PCR in an MPEG-TS buffer by `ticks` (90kHz).
+
+    What makes a run of hold segments playable. The hold is one file, so served
+    as-is every hold carried the *same* timestamps - and only the first hold of
+    a run opens a discontinuity, so to the player each later one was the
+    previous second over again. hls.js laid them on top of each other: the
+    playlist grew by a second per hold while the buffer did not, which is a
+    stall, on top of the black.
+    """
+    out = bytearray(data)
+    for pos in range(0, len(out) - 187, 188):
+        if out[pos] != 0x47:
+            continue
+        payload_start = out[pos + 1] & 0x40
+        adaptation = (out[pos + 3] >> 4) & 0x03
+        idx = pos + 4
+        if adaptation & 0x02:
+            length = out[idx]
+            if length and out[idx + 1] & 0x10:
+                # PCR base: 33 bits, then 6 reserved bits and a 9-bit extension.
+                p = idx + 2
+                base = (
+                    out[p] << 25 | out[p + 1] << 17 | out[p + 2] << 9 | out[p + 3] << 1
+                ) | (out[p + 4] >> 7)
+                base = (base + ticks) % _PTS_WRAP
+                out[p] = (base >> 25) & 0xFF
+                out[p + 1] = (base >> 17) & 0xFF
+                out[p + 2] = (base >> 9) & 0xFF
+                out[p + 3] = (base >> 1) & 0xFF
+                out[p + 4] = ((base & 1) << 7) | (out[p + 4] & 0x7F)
+            idx += 1 + length
+        if not (adaptation & 0x01) or not payload_start or idx + 19 > pos + 188:
+            continue
+        if out[idx : idx + 3] != b"\x00\x00\x01":
+            continue  # PSI (PAT/PMT), not a PES header
+        flags = (out[idx + 7] >> 6) & 0x03
+        if flags & 0x02:
+            _shift_timestamp(out, idx + 9, ticks)
+        if flags == 0x03:
+            _shift_timestamp(out, idx + 14, ticks)
+    return bytes(out)
+
+
+def serve_hold(login: str, seq: int = 0) -> Response:
     """Serve the hold segment: one black, silent, decodable second of our own.
 
-    Handed out during an ad break that no clean backup has covered yet. It is a
-    static file, so unlike every other segment route there is no upstream fetch
-    and nothing client-supplied reaches the filesystem - the `seq` query
-    parameter exists only to make each hold's url unique, so the session's
-    already-served map cannot collapse a run of them into a playlist that stops
-    advancing.
+    Handed out during an ad break that no clean backup has covered yet. There is
+    no upstream fetch and nothing client-supplied reaches the filesystem. `seq`
+    makes each hold's url unique, so the session's already-served map cannot
+    collapse a run of them into a playlist that stops advancing - and it stamps
+    the hold one second further along than the previous one, so a run of them
+    is a continuous timeline rather than the same second repeated (see
+    `retime_ts`).
     """
     if not HOLD_SEGMENT_PATH.is_file():  # pragma: no cover - packaging error
         log.error("hold segment asset is missing", path=str(HOLD_SEGMENT_PATH))
@@ -576,8 +641,10 @@ def serve_hold(login: str) -> Response:
 
     # A client pulling holds is alive even if a playlist poll runs late.
     stream_session.touch_any(login)
-    return FileResponse(
-        HOLD_SEGMENT_PATH, media_type="video/mp2t", headers={"Cache-Control": "no-store"}
+    return Response(
+        retime_ts(_hold_bytes(), (seq * _HOLD_TICKS) % _PTS_WRAP),
+        media_type="video/mp2t",
+        headers={"Cache-Control": "no-store"},
     )
 
 

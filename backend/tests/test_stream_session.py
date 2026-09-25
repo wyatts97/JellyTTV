@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -422,7 +421,12 @@ async def test_the_hold_ends_and_marks_the_seam_when_content_returns():
 
 
 def build_backup_playlist(*, start_seq: int, count: int = 4) -> str:
-    """The same channel from another player type - clean, and still live."""
+    """The same channel from another player type - clean, and still live.
+
+    Stamped on the native stream's clock, because that is what Twitch does:
+    PROGRAM-DATE-TIME comes from the transcoder, not from the token, so every
+    copy of a channel names the same moment the same way.
+    """
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
@@ -438,14 +442,99 @@ def build_backup_playlist(*, start_seq: int, count: int = 4) -> str:
     return "\n".join(lines) + "\n"
 
 
+# A backup token that has been stitched with a pod of its own.
+AD_MARKED_BACKUP = """#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:{seq}
+#EXT-X-DATERANGE:ID="stitched-ad-{seq}",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z"
+#EXTINF:2.000,
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq}.ts
+#EXTINF:2.000,
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq2}.ts
+"""
+
+BACKUP_URL = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
+
+
+class BackupWorld:
+    """The native stream plus any number of backup tokens that mirror it.
+
+    Each backup url maps to `behaviour(fetch_number, start_seq, count)`, called
+    with the window the native stream showed on the same poll, so a clean
+    backup carries exactly the moments the native one is advertising over.
+    """
+
+    def __init__(self, native: list[str]):
+        self._native_fetch, _ = make_fetch(native)
+        self.window = (100, 4)
+        self.behaviour: dict = {}
+        self.fetches: dict[str, int] = {}
+
+    def mirror(self, url: str) -> None:
+        self.behaviour[url] = lambda n, seq, count: build_backup_playlist(
+            start_seq=seq, count=count
+        )
+
+    async def fetch(self, url: str) -> tuple[int, str]:
+        if url in self.behaviour:
+            n = self.fetches[url] = self.fetches.get(url, 0) + 1
+            result = self.behaviour[url](n, *self.window)
+            return result if isinstance(result, tuple) else (200, result)
+        status, text = await self._native_fetch(url)
+        self.window = (int(_MSEQ.search(text).group(1)), text.count("#EXTINF"))
+        return status, text
+
+
+def candidate(url: str = BACKUP_URL, player_type: str = "embed", **kwargs):
+    return stream_session.BackupCandidate(
+        player_type=player_type, quality="best", url=url, playlist="", **kwargs
+    )
+
+
+async def run_polls(world: BackupWorld, count: int, *, find_backup, age_backup: bool = False):
+    """Poll the session `count` times against a BackupWorld.
+
+    `age_backup` moves the active backup's promotion back by SPARE_LEAD_SECONDS
+    after every poll, standing in for the real time that passes between polls,
+    so the spare for the next hand-over is minted.
+    """
+    resolve, _ = make_resolve()
+    renders, serving, holds = [], [], []
+    for _ in range(count):
+        renders.append(
+            await stream_session.get_playlist(
+                login="adapt",
+                quality="best",
+                strip_ads=True,
+                resolve=resolve,
+                fetch=world.fetch,
+                backup=find_backup,
+                hold_uri=hold_uri,
+            )
+        )
+        session = stream_session.get("adapt", "best")
+        session.last_render_at = 0.0
+        serving.append(session.serving_backup)
+        holds.append(session.stats.hold_segments)
+        if age_backup and session.backup_promoted_at:
+            session.backup_promoted_at -= stream_session.SPARE_LEAD_SECONDS
+        # Searches run detached; give the one this poll started its turn.
+        await asyncio.sleep(0)
+    return renders, serving, holds
+
+
+def served_uris(renders) -> set[str]:
+    return {u for r in renders for u in _URI.findall(r.text)}
+
+
 async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
     """The whole point of the TTV-AB strategy.
 
     An ad is stitched per token, so the same channel on another player type is
     usually still carrying the live content. Splicing it in turns a break from
-    dead air for its full duration into a seam. Every previous approach here
-    accepted the hole because it assumed there was nothing else to play; there
-    is.
+    dead air for its full duration into a seam - and with a spare kept warm,
+    into a seam on the very poll that sees the break, with no hold at all.
     """
     native = [
         build_playlist(start_seq=100, count=4),
@@ -455,181 +544,117 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
         build_playlist(start_seq=116, count=4),
         build_playlist(start_seq=120, count=4),
     ]
-    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
-    backup_seq = {"n": 200}
-    native_fetch, _ = make_fetch(native)
-
-    async def fetch(url: str):
-        if url == backup_url:
-            playlist = build_backup_playlist(start_seq=backup_seq["n"])
-            backup_seq["n"] += 4
-            return 200, playlist
-        return await native_fetch(url)
+    world = BackupWorld(native)
+    world.mirror(BACKUP_URL)
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        return stream_session.BackupCandidate(
-            player_type="embed",
-            quality=quality,
-            url=backup_url,
-            playlist=build_backup_playlist(start_seq=200),
-        )
+        return candidate()
 
-    resolve, _ = make_resolve()
-    renders = []
-    for _ in native:
-        renders.append(
-            await stream_session.get_playlist(
-                login="adapt",
-                quality="best",
-                strip_ads=True,
-                resolve=resolve,
-                fetch=fetch,
-                backup=find_backup,
-            )
-        )
-        stream_session.get("adapt", "best").last_render_at = 0.0
-        # The backup search runs detached, so it needs a turn of the event loop
-        # to finish. In production every poll awaits real network I/O and yields
-        # many times over; these fakes never block, so yield explicitly.
-        await asyncio.sleep(0)
+    renders, _, _ = await run_polls(world, len(native), find_backup=find_backup)
 
-    # The break costs exactly one poll of ad while the detached search completes -
-    # the alternative, awaiting it inline, is what used to hold the response open
-    # until ffmpeg gave up. Those segments then age out of the window normally,
-    # so what matters is that no *further* ad is ever committed.
-    ad_uris = {u for r in renders for u in _URI.findall(r.text) if "/ad1" in u}
-    assert len(ad_uris) == 4, f"only the one pod-poll should have been served: {ad_uris}"
-
-    # The first ad poll only *starts* the search and returns straight away - it
-    # is never awaited inline, because resolving a backup means spawning
-    # streamlink and doing that while the client waits for this playlist is what
-    # made an ad break look like a dead channel.
-    assert renders[1].backup_player_type is None
-
-    # ...and from the next poll the break is filled with real video from the
-    # backup, not silence.
-    assert renders[2].backup_player_type == "embed"
-    assert "bak200.ts" in renders[2].text
-    assert renders[2].segment_count > 0, "the break produced no media"
-
+    assert not [u for u in served_uris(renders) if "/ad1" in u], "an ad reached the player"
+    assert renders[1].backup_player_type == "embed", "the first ad poll was not covered"
+    assert "bak104.ts" in renders[1].text, "the backup did not carry on where native left off"
     session = stream_session.get("adapt", "best")
+    assert session.stats.hold_segments == 0, "a break with a spare ready showed black"
     assert session.stats.backup_polls >= 2
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_the_backup_search_starts_at_the_live_edge_not_at_a_full_pod():
-    """Cover the break on its first ad-only poll, not its second.
+async def test_a_break_is_covered_from_its_first_ad_segment_not_a_full_window():
+    """The black screen at the start of every break.
 
-    The search used to be triggered only once *every* segment in the window was
-    an ad, which is a whole window after the break actually began. Because the
-    search is detached, that poll could only hold a black second and pick the
-    result up on the next one. Starting it while there is still content in the
-    window - the pod growing at the live edge - means the candidate is already
-    resolved when the first ad-only poll needs it.
+    A backup used to be spliced in only once *every* segment in the native
+    window was advertising. On Twitch that is 30s or more after the break
+    began, all of it held on black - while the clean candidate found for it sat
+    unused, until it had been stitched too and was thrown away. Observed live:
+    33s of hold segments with a verified candidate in hand the whole time.
     """
     native = [
         build_playlist(start_seq=100, count=4),
-        # Mixed: 102-103 are content, 104-105 are the start of the pod. Nothing
-        # is substituted here - but the search starts.
+        # Mixed: 102-103 are content, 104-105 are the start of the pod.
         build_playlist(start_seq=102, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
-        # Now the pod fills the window, and the prefetched candidate covers it.
         build_playlist(start_seq=106, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
         build_playlist(start_seq=110, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
         build_playlist(start_seq=114, count=4),
     ]
+    world = BackupWorld(native)
+    world.mirror(BACKUP_URL)
     searches = {"n": 0}
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return stream_session.BackupCandidate(
-            player_type="picture-by-picture",
-            quality=quality,
-            url="https://video-weaver.b.hls.ttvnw.net/backup.m3u8",
-            playlist=build_backup_playlist(start_seq=200),
-        )
+        return candidate(player_type="picture-by-picture")
 
-    renders, _ = await poll_all(native, backup=find_backup)
+    renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
 
-    # The mixed poll serves the native stream with the ads held over, and
-    # promotes nothing: `ad_pod` still decides what is played.
-    assert renders[1].backup_player_type is None
-    assert searches["n"] >= 1, "the live-edge pod should have started a search"
-    holds_before = stream_session.get("adapt", "best").stats.hold_segments
-
-    # ...and the first ad-only poll is already covered by the backup: the holds
-    # from the live-edge seconds scroll by, and no new ones are added.
-    assert renders[2].backup_player_type == "picture-by-picture"
-    assert stream_session.get("adapt", "best").stats.hold_segments == holds_before, (
-        "a prefetched candidate should mean the break needs no further holding"
-    )
-    assert renders[2].segment_count > 0, "the break produced no media"
+    # The mixed poll is already covered: native up to the pod, the backup from it.
+    assert renders[1].backup_player_type == "picture-by-picture"
+    assert "seg103.ts" in renders[1].text
+    assert "bak104.ts" in renders[1].text
+    assert "bak102.ts" not in renders[1].text, "time already served was served again"
+    assert holds[-1] == 0, "the break was held instead of covered"
+    # One search, before the break, to keep a spare warm - none during it.
+    assert searches["n"] == 1
     assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_a_clean_stream_never_starts_a_backup_search():
-    """The earlier trigger must not turn ordinary content into streamlink spawns."""
-    native = [build_playlist(start_seq=100 + 4 * i, count=4) for i in range(5)]
+async def test_a_clean_stream_keeps_one_spare_warm_without_searching_every_poll():
+    """Ready for the next break, at the cost of one search per SPARE_MAX_AGE."""
+    native = [build_playlist(start_seq=100 + 4 * i, count=4) for i in range(6)]
     searches = {"n": 0}
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return None
+        return candidate()
 
-    renders, _ = await poll_all(native, backup=find_backup)
-
-    assert searches["n"] == 0
+    renders, _ = await poll_all(native[:5], backup=find_backup)
+    assert searches["n"] == 1
     assert all(r.backup_player_type is None for r in renders)
+    session = stream_session.get("adapt", "best")
+    assert session.spare is not None
+
+    # A spare past its age is re-minted rather than trusted at the next break.
+    session.spare.found_at -= stream_session.SPARE_MAX_AGE + 1
+    await poll_all(native[5:], backup=find_backup)
+    assert searches["n"] == 2
 
 
-async def test_a_stale_prefetched_candidate_is_dropped_not_spliced():
-    """A clean verdict expires, and promoting an expired one costs the break.
+async def test_a_spare_stitched_since_it_was_found_is_discarded_not_spliced():
+    """A clean verdict expires; the check that matters is the one at promotion.
 
-    Starting the search at the live edge means a candidate can be found well
-    before the break needs it. Twitch can stitch an ad into that player type in
-    the meantime, and `_serve_backup` re-validates on promotion - so splicing a
-    stale candidate does not serve an ad, but it does cool that player type down
-    as ad-marked, which discards the type most likely to come back clean for the
-    rest of the break. Observed live: a candidate found 25s early was burned on
-    the first poll that needed it.
-
-    So a stale one is dropped without a penalty and the search restarted.
+    The spare is re-fetched immediately before it is promoted. One stitched in
+    the meantime is dropped - without cooling its player type down, since a
+    fresh token of the same type is still the likeliest to be clean - and the
+    break holds only until the replacement search lands.
     """
     native = [
         build_playlist(start_seq=100, count=4),
-        # Mixed - the pod is at the live edge, so a search starts here.
         build_playlist(start_seq=102, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
-        # Now the pod fills the window and wants a backup.
         build_playlist(start_seq=106, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
         build_playlist(start_seq=110, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
-        build_playlist(start_seq=114, count=4),
     ]
+    stale_url = "https://video-weaver.b.hls.ttvnw.net/stale.m3u8"
+    world = BackupWorld(native)
+    world.behaviour[stale_url] = lambda n, seq, count: AD_MARKED_BACKUP.format(
+        seq=seq, seq2=seq + 1
+    )
+    world.mirror(BACKUP_URL)
     searches = {"n": 0}
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        # The first verdict is already expired by the time it is wanted; the
-        # replacement search returns a fresh one.
-        age = 30.0 if searches["n"] == 1 else 0.0
-        return stream_session.BackupCandidate(
-            player_type="picture-by-picture",
-            quality=quality,
-            url="https://video-weaver.b.hls.ttvnw.net/backup.m3u8",
-            playlist=build_backup_playlist(start_seq=200),
-            found_at=time.monotonic() - age,
-        )
+        url = stale_url if searches["n"] == 1 else BACKUP_URL
+        return candidate(url, player_type="picture-by-picture")
 
-    renders, _ = await poll_all(native, backup=find_backup)
+    renders, _, _ = await run_polls(world, len(native), find_backup=find_backup)
     session = stream_session.get("adapt", "best")
 
-    # The stale verdict is not spliced...
-    assert renders[2].backup_player_type is None
-    assert HOLD_URI_PREFIX in renders[2].text, "the break should hold for that poll"
-    # ...and crucially the player type is left in the rotation rather than cooled
-    # down on the strength of information that had expired.
+    assert renders[1].backup_player_type is None, "a stitched spare was spliced"
+    assert HOLD_URI_PREFIX in renders[1].text, "the break should hold for that poll"
     assert "picture-by-picture" not in session.backup.cooldowns
-    # The replacement search covers the very next poll.
-    assert searches["n"] >= 2
-    assert renders[3].backup_player_type == "picture-by-picture"
+    assert renders[2].backup_player_type == "picture-by-picture"
+    assert "bakad" not in "\n".join(r.text for r in renders)
     assert_playlist_continuity([r.text for r in renders])
 
 
@@ -637,50 +662,27 @@ async def test_native_resumes_only_after_several_clean_polls():
     """One clean poll is routinely the gap between two pods of one break."""
     native = [
         build_playlist(start_seq=100, count=4),
-        # Two ad polls: the first starts the (detached) search, the second picks
-        # its result up. A backup is never awaited inline.
         build_playlist(start_seq=104, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
         build_playlist(start_seq=108, count=4, ad_at=104, ad_len=8, ad_duration=16.0),
         build_playlist(start_seq=112, count=4),  # clean 1 - not yet
         build_playlist(start_seq=116, count=4),  # clean 2 - not yet
         build_playlist(start_seq=120, count=4),  # clean 3 - switch back
     ]
-    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
-    backup_seq = {"n": 200}
-    native_fetch, _ = make_fetch(native)
-
-    async def fetch(url: str):
-        if url == backup_url:
-            playlist = build_backup_playlist(start_seq=backup_seq["n"])
-            backup_seq["n"] += 4
-            return 200, playlist
-        return await native_fetch(url)
+    world = BackupWorld(native)
+    world.mirror(BACKUP_URL)
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        return stream_session.BackupCandidate(
-            player_type="embed", quality=quality, url=backup_url, playlist=""
-        )
+        return candidate()
 
-    resolve, _ = make_resolve()
-    serving = []
-    for _ in native:
-        await stream_session.get_playlist(
-            login="adapt",
-            quality="best",
-            strip_ads=True,
-            resolve=resolve,
-            fetch=fetch,
-            backup=find_backup,
-        )
-        session = stream_session.get("adapt", "best")
-        session.last_render_at = 0.0
-        serving.append(session.serving_backup)
-        # See the note in the test above: let the detached search complete.
-        await asyncio.sleep(0)
+    renders, serving, _ = await run_polls(world, len(native), find_backup=find_backup)
 
-    assert serving == [False, False, True, True, True, False], (
+    assert serving == [False, True, True, True, True, False], (
         "expected the backup to be held across the first clean polls"
     )
+    # Back on native exactly where the backup left off.
+    assert "seg120.ts" in renders[-1].text
+    assert "seg116.ts" not in renders[-1].text, "time the backup served was served again"
+    assert_playlist_continuity([r.text for r in renders])
 
 
 def build_amazon_titled_playlist(*, start_seq: int, count: int = 4) -> str:
@@ -1045,116 +1047,140 @@ async def test_the_bridge_upgrade_is_capped_per_break():
     assert session.serving_backup is True, "the bridge was dropped instead of held"
 
 
-# ----------------------------------------------- staying on one backup source
-AD_MARKED_BACKUP = """#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:2
-#EXT-X-MEDIA-SEQUENCE:{seq}
-#EXT-X-DATERANGE:ID="stitched-ad-{seq}",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z"
-#EXTINF:2.000,
-https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq}.ts
-#EXTINF:2.000,
-https://video-weaver.b.hls.ttvnw.net/v1/playlist/bakad{seq2}.ts
-"""
+# ------------------------------------------------ handing a break between tokens
+async def test_a_stitched_backup_is_handed_over_to_the_spare_within_the_same_poll():
+    """The relay that covers a long midroll without black.
 
-
-async def test_a_backup_that_catches_the_ad_is_held_through_not_thrown_away():
-    """The rotation storm that made a three-minute break unwatchable.
-
-    A token minted mid-pod is routinely stitched a second or two after it is
-    promoted. Dropping the backup on that first ad-marked poll meant: black, a
-    discontinuity, another search, another promotion - roughly every four
-    seconds for the length of the break, which is what the player showed as
-    shuffling between streams and freezing.
-
-    A backup is now treated like the native stream: its ad segments are replaced
-    by holds and the source is kept.
+    Measured live: a fresh token plays clean for 30-40s of a break and is then
+    stitched too. The backup used to be held through up to four fully-ad polls
+    of its own - each emitting black - and only then dropped, with nothing
+    ready to take over: ten seconds or more of black per hand-over. Now the next
+    token is minted while the current one is still clean, and takes over on the
+    poll the current one is stitched.
     """
     native = [build_playlist(start_seq=100, count=4)] + [
         build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
         for i in range(5)
     ]
-    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
-    backup_seq = {"n": 200}
-    native_fetch, _ = make_fetch(native)
-    polls = {"n": 0}
-
-    async def fetch(url: str):
-        if url == backup_url:
-            polls["n"] += 1
-            seq = backup_seq["n"]
-            backup_seq["n"] += 4
-            # Clean when promoted, stitched on the next two polls, clean again.
-            if polls["n"] in (2, 3):
-                return 200, AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
-            return 200, build_backup_playlist(start_seq=seq)
-        return await native_fetch(url)
-
+    first = "https://video-weaver.b.hls.ttvnw.net/first.m3u8"
+    second = "https://video-weaver.c.hls.ttvnw.net/second.m3u8"
+    world = BackupWorld(native)
+    world.behaviour[first] = lambda n, seq, count: (
+        build_backup_playlist(start_seq=seq, count=count)
+        if n <= 2
+        else AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
+    )
+    world.mirror(second)
     searches = {"n": 0}
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return stream_session.BackupCandidate(
-            player_type="embed", quality=quality, url=backup_url, playlist="",
-        )
+        return candidate(first if searches["n"] == 1 else second)
 
-    resolve, _ = make_resolve()
-    for _ in native:
-        await stream_session.get_playlist(
-            login="adapt", quality="best", strip_ads=True,
-            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
-        )
-        session = stream_session.get("adapt", "best")
-        session.last_render_at = 0.0
-        await asyncio.sleep(0)
-
+    renders, _, holds = await run_polls(
+        world, len(native), find_backup=find_backup, age_backup=True
+    )
     session = stream_session.get("adapt", "best")
-    assert session.backup.active is not None, "the backup was thrown away over one ad poll"
-    assert session.backup.active.player_type == "embed"
-    assert "embed" not in session.backup.stitched_this_break
-    assert searches["n"] == 1, f"the break re-searched {searches['n']} times"
+
+    assert holds[-1] == 0, "a hand-over with a spare ready showed black"
+    assert session.stats.backup_handovers == 1
+    assert session.backup.active.url == second
+    text = "\n".join(r.text for r in renders)
+    assert "bakad" not in text and "/ad1" not in text, "an ad reached the player"
+    assert_playlist_continuity([r.text for r in renders])
 
 
-async def test_a_backup_stuck_in_the_break_is_eventually_rotated_away():
-    """Held through, but not forever: a copy that is simply in the break too."""
+async def test_a_break_whose_backups_keep_being_stitched_falls_back_to_the_safe_source():
+    """Lower resolution, but never a rotation storm of seams and black.
+
+    If every full-quality token is stitched moments after it is promoted, the
+    relay is all seams. After MAX_FULL_QUALITY_ROTATIONS of those the rest of the
+    break comes from `picture-by-picture`, the one source Twitch never stitches.
+    """
     native = [build_playlist(start_seq=100, count=4)] + [
         build_playlist(start_seq=104 + i * 4, count=4, ad_at=104, ad_len=200, ad_duration=400.0)
-        for i in range(8)
+        for i in range(16)
     ]
-    backup_url = "https://video-weaver.b.hls.ttvnw.net/backup.m3u8"
-    backup_seq = {"n": 200}
-    native_fetch, _ = make_fetch(native)
-
-    async def fetch(url: str):
-        if url == backup_url:
-            seq = backup_seq["n"]
-            backup_seq["n"] += 4
-            return 200, AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
-        return await native_fetch(url)
+    safe = "https://video-weaver.s.hls.ttvnw.net/pbp.m3u8"
+    world = BackupWorld(native)
+    world.mirror(safe)
+    minted = {"n": 0}
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        if "embed" in state.stitched_this_break:
-            return None
-        return stream_session.BackupCandidate(
-            player_type="embed", quality=quality, url=backup_url, playlist="",
+        if state.prefer_safe:
+            return candidate(safe, player_type="picture-by-picture", is_bridge=True)
+        minted["n"] += 1
+        url = f"https://video-weaver.b.hls.ttvnw.net/embed-{minted['n']}.m3u8"
+        # Clean on the check before promotion, stitched straight after it.
+        world.behaviour[url] = lambda n, seq, count: (
+            build_backup_playlist(start_seq=seq, count=count)
+            if n == 1
+            else AD_MARKED_BACKUP.format(seq=seq, seq2=seq + 1)
         )
+        return candidate(url)
 
-    resolve, _ = make_resolve()
-    for _ in native:
-        await stream_session.get_playlist(
-            login="adapt", quality="best", strip_ads=True,
-            resolve=resolve, fetch=fetch, backup=find_backup, hold_uri=hold_uri,
-        )
-        session = stream_session.get("adapt", "best")
-        session.last_render_at = 0.0
-        await asyncio.sleep(0)
-
+    renders, _, _ = await run_polls(world, len(native), find_backup=find_backup)
     session = stream_session.get("adapt", "best")
-    assert session.backup.active is None, "a permanently stitched backup was kept"
-    # ...and it stays out of the rotation for the rest of the break, rather than
-    # being promoted again a few seconds later.
-    assert "embed" in session.backup.stitched_this_break
-    assert "embed" not in session.backup.available_types(exclude=None, now=1e9)
+
+    assert session.backup.prefer_safe
+    assert session.short_lived_backups >= stream_session.MAX_FULL_QUALITY_ROTATIONS
+    assert session.backup.active is not None
+    assert session.backup.active.player_type == "picture-by-picture"
+    text = "\n".join(r.text for r in renders)
+    assert "bakad" not in text and "/ad1" not in text, "an ad reached the player"
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_falling_back_to_holds_never_re_holds_time_a_backup_already_covered():
+    """The burst of black that made the player jump.
+
+    Twitch's ad segments are not stamped on the content grid, so the content a
+    backup served for a moment and the ad native carried for it never share a
+    segment identity. When a backup was lost mid-break, every ad segment still
+    in native's window was held over again - tens of seconds of black appended
+    in one poll, for time the viewer had already watched. That pushed the
+    player past its live window and made it jump. Time, not identity, now
+    decides what is already covered.
+    """
+
+    def window(i: int) -> str:
+        # 12-segment windows advancing 4 at a time: 8 old, 4 new per poll.
+        return build_playlist(
+            start_seq=92 + i * 4, count=12, ad_at=104, ad_len=200, ad_duration=400.0
+        )
+
+    native = [build_playlist(start_seq=92, count=12)] + [window(i) for i in range(1, 9)]
+    # Stamp the ad segments off the content grid, as Twitch's are.
+    native = [
+        re.sub(
+            r"#EXT-X-PROGRAM-DATE-TIME:(\S+)\n(#EXTINF:[^\n]*\n\S+/ad\d+\.ts)",
+            lambda m: "#EXT-X-PROGRAM-DATE-TIME:"
+            + (datetime.fromisoformat(m.group(1)) + timedelta(seconds=0.3)).isoformat()
+            + "\n"
+            + m.group(2),
+            text,
+        )
+        for text in native
+    ]
+    world = BackupWorld(native)
+    # Serves four polls, then dies.
+    world.behaviour[BACKUP_URL] = lambda n, seq, count: (
+        (200, build_backup_playlist(start_seq=seq, count=count)) if n <= 4 else (0, "")
+    )
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        searches["n"] += 1
+        return candidate() if searches["n"] == 1 else None
+
+    renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
+
+    added = [b - a for a, b in zip([0, *holds], holds, strict=False)]
+    # Each poll brings 8s of new advertising; nothing more may ever be held.
+    assert max(added) <= 8, f"held more than real time in one poll: {added}"
+    assert holds[-1] > 0, "the lost backup should have been covered by holds"
+    assert "/ad1" not in "\n".join(r.text for r in renders)
+    assert_playlist_continuity([r.text for r in renders])
 
 
 async def test_a_failed_upgrade_keeps_the_bridge_it_was_trying_to_replace():
@@ -1211,4 +1237,3 @@ async def test_a_failed_upgrade_keeps_the_bridge_it_was_trying_to_replace():
     assert session.backup.active is not None, "the bridge was lost to a bad upgrade"
     assert session.backup.active.player_type == "autoplay"
     assert session.stats.bridge_upgrades == 0, "an ad-marked candidate was promoted"
-    assert "embed" in session.backup.stitched_this_break

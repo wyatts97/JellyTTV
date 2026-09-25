@@ -412,6 +412,31 @@ async def test_the_hold_segment_is_served_and_the_encoder_route_is_gone(
     gone = await client.get(f"/hls/anychannel/nseg/seg1.ts?key={token}")
     assert gone.status_code == 404
 
+    # Consecutive holds are consecutive seconds, not the same second repeated:
+    # only the first hold of a run opens a discontinuity, so the player lays
+    # the rest end to end by their timestamps.
+    first = await client.get(f"/hls/anychannel/hold?seq=7&key={token}")
+    second = await client.get(f"/hls/anychannel/hold?seq=8&key={token}")
+    assert _first_pts(second.content) - _first_pts(first.content) == 90_000
+
+
+def _first_pts(ts: bytes) -> int:
+    """The PTS of the first PES header in an MPEG-TS buffer, in 90kHz ticks."""
+    for pos in range(0, len(ts) - 187, 188):
+        idx = pos + 4
+        if (ts[pos + 3] >> 4) & 0x02:
+            idx += 1 + ts[idx]
+        if ts[pos + 1] & 0x40 and ts[idx : idx + 3] == b"\x00\x00\x01":
+            p = idx + 9
+            return (
+                ((ts[p] >> 1) & 0x07) << 30
+                | ts[p + 1] << 22
+                | ((ts[p + 2] >> 1) & 0x7F) << 15
+                | ts[p + 3] << 7
+                | ((ts[p + 4] >> 1) & 0x7F)
+            )
+    raise AssertionError("no PES header in the hold segment")
+
 
 async def test_settings_recovers_from_null_columns_left_by_an_upgrade(
     client: httpx.AsyncClient,

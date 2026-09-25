@@ -144,7 +144,10 @@ async def live_status(
         return {"active": False, "mode": mode, "in_ad_break": False}
     snap = sess.snapshot()
     in_ad_break = bool(
-        snap["serving_backup"] or snap["holding"] or snap["consecutive_ad_polls"] > 0
+        snap["in_break"]
+        or snap["serving_backup"]
+        or snap["holding"]
+        or snap["consecutive_ad_polls"] > 0
     )
     # What picture is actually being served, so the player can say whether the
     # break cost any quality.
@@ -181,5 +184,7 @@ async def segment(
 
 
 @router.get("/{login}/hold", include_in_schema=False)
-async def hold(login: str, _user: AdminUser) -> Response:
-    return hls_router.serve_hold(login)
+async def hold(
+    login: str, _user: AdminUser, seq: Annotated[int, Query(ge=0)] = 0
+) -> Response:
+    return hls_router.serve_hold(login, seq)

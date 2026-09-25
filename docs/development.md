@@ -63,10 +63,15 @@ Regenerate it only if the shape needs to change:
 ```bash
 ffmpeg -y \
   -f lavfi -i color=c=black:s=640x360:r=30:d=1 \
-  -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 \
-  -shortest -c:v libx264 -profile:v baseline -g 30 -pix_fmt yuv420p \
+  -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+  -t 1 -shortest -c:v libx264 -profile:v baseline -g 30 -pix_fmt yuv420p \
   -c:a aac -b:a 64k -f mpegts backend/app/assets/hold.ts
 ```
+
+48 kHz matches Twitch's audio, so a seam into or out of a hold is not also an
+audio sample-rate change. The file is served re-stamped by its `seq` (see
+`retime_ts` in `routers/hls.py`), so its own starting timestamp does not
+matter, but its length must stay one second - `HOLD_SEGMENT_SECONDS`.
 
 Baseline profile and a keyframe every frame are the point: it has to be
 decodable by anything, starting from any segment, with no reference to what

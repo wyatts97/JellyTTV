@@ -90,23 +90,20 @@ COOLDOWNS = {
 # one, and a break where every type is dirty can change on the next pod.
 EXHAUSTED_COOLDOWN = 5.0
 
-# How long a candidate's "clean" verdict is worth anything.
-#
-# A candidate is accepted on the strength of one playlist fetched at one moment.
-# That playlist covers a few seconds of a live stream, so the verdict expires
-# about as fast: the same player type can be clean when probed and stitched
-# moments later - which is exactly what happens when a search is started early,
-# before the break has filled the window.
-#
-# Increased from 8s to 45s: the prefetch can find a candidate well before the
-# break needs it (ad_incoming triggers search while content remains), and a
-# shorter TTL caused stale drops mid-break, forcing a re-search and a hold.
-CANDIDATE_STALE_SECONDS = 45.0
-
 # Consecutive clean polls of the native stream before switching back. Matches
 # TTV-AB's AD_END_MIN_CLEAN_PLAYLISTS: one clean poll is routinely a gap between
 # two pods rather than the end of the break.
 MIN_CLEAN_POLLS_TO_RESUME = 3
+
+# Short-lived full-quality backups one break may burn through before the rest
+# of it is covered from `picture-by-picture` instead. Measured live: a freshly
+# minted `embed` or `popout` token plays clean for roughly 30-40s of a midroll
+# and is then stitched too, so a long break is a relay of fresh tokens, which
+# is fine. Only a backup stitched soon after promotion counts here (see
+# `stream_session.SHORT_LIVED_BACKUP_SECONDS`): if that keeps happening the
+# relay is all seams, and the one source Twitch never stitches is the better
+# deal - lower resolution, but never black.
+MAX_FULL_QUALITY_ROTATIONS = 4
 
 
 @dataclass
@@ -123,9 +120,8 @@ class BackupCandidate:
     # When the playlist backing this verdict was fetched (`time.monotonic`).
     found_at: float = field(default_factory=time.monotonic)
 
-    def is_stale(self, now: float) -> bool:
-        """Has this candidate's clean verdict expired? See CANDIDATE_STALE_SECONDS."""
-        return now - self.found_at > CANDIDATE_STALE_SECONDS
+    def age(self, now: float) -> float:
+        return now - self.found_at
 
 
 @dataclass
@@ -136,16 +132,10 @@ class BackupState:
     cooldowns: dict[str, float] = field(default_factory=dict)
     searching: bool = False
     searches: int = 0
-    # Set when a new ad daterange is detected, triggering an early backup search
-    # before the break consumes the window. Cleared when the search starts.
-    prefetch_triggered: bool = False
-
-    # Player types caught carrying the ad during the break in progress. Twitch
-    # does not un-insert a pod, so a type that was stitched once stays stitched
-    # for the rest of it: re-promoting it a few seconds later buys a seam and a
-    # run of black, which is what made a single midroll look like the player was
-    # shuffling between streams. Cleared when the break ends.
-    stitched_this_break: set[str] = field(default_factory=set)
+    # Set once a break has rotated through MAX_FULL_QUALITY_ROTATIONS backups:
+    # the search then offers only the never-stitched preview source for the
+    # rest of it. Cleared when the break ends.
+    prefer_safe: bool = False
     # Set when a whole rotation came back with nothing clean; no new search
     # starts before this.
     exhausted_until: float = 0.0
@@ -154,12 +144,16 @@ class BackupState:
 
     def available_types(self, exclude: str | None, now: float) -> list[str]:
         """Player types worth trying, best first, minus the native one."""
+        if self.prefer_safe:
+            return [FAST_BRIDGE_TYPE] if exclude != FAST_BRIDGE_TYPE else []
+        # A type whose backup was stitched mid-break is *not* excluded here: ads
+        # are stitched per token, and the search always mints a fresh one, which
+        # comes back clean even while the previous token of the same type is
+        # carrying the pod.
         return [
             pt
             for pt in BACKUP_PLAYER_TYPES
-            if pt != exclude
-            and pt not in self.stitched_this_break
-            and self.cooldowns.get(pt, 0.0) <= now
+            if pt != exclude and self.cooldowns.get(pt, 0.0) <= now
         ]
 
     def penalise(self, player_type: str, reason: str, now: float) -> None:
@@ -172,7 +166,6 @@ class BackupState:
 
     def clear(self) -> None:
         self.active = None
-        self.prefetch_triggered = False
 
 
 def is_playable(playlist: str) -> bool:
@@ -277,7 +270,10 @@ async def _probe_player_type(
         quality=variant.quality,
         url=variant.url,
         playlist=playlist,
-        is_bridge=match is not None and not exact,
+        # With nothing to match against, a preview tier is still a degraded
+        # picture, and must be marked so the session looks for full quality
+        # behind it rather than playing 360p for the whole break.
+        is_bridge=(not exact) if match is not None else player_type in LOW_QUALITY_PLAYER_TYPES,
     )
     probe.exact = exact
     probe.pixels = variant.pixels
@@ -336,11 +332,11 @@ async def find_backup(
                         fetch=fetch,
                         user_token=user_token,
                         device_id=device_id,
-                        # A backup is only useful if it is live *now*, so a
-                        # search re-mints rather than trusting a cached master
-                        # that predates the break - except for the preview tiers,
-                        # whose ladders never change.
-                        force=player_type not in LOW_QUALITY_PLAYER_TYPES,
+                        # Always a fresh token. Ads are stitched per token, so a
+                        # cached master for a preview tier is exactly as likely
+                        # to be carrying the pod as the one that just failed -
+                        # the ladder never changes, but the token does.
+                        force=True,
                         exact_only=full_quality_only,
                     )
                     for player_type in types

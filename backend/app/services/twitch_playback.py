@@ -374,8 +374,18 @@ def variant_for_url(url: str | None) -> Variant | None:
 
     A url resolved by streamlink is not in here, and the caller then has nothing
     to match against - it falls back to choosing by quality.
+
+    A hit counts as use. Every backup search adds a whole ladder per player
+    type, so without this the url a session is *playing* - looked up on every
+    search, but minted once - aged out after a quarter of an hour and every
+    later break was searched with nothing to match.
     """
-    return _variants_by_url.get(url) if url else None
+    if not url:
+        return None
+    variant = _variants_by_url.get(url)
+    if variant is not None:
+        _variants_by_url.move_to_end(url)
+    return variant
 
 
 def _key(login: str, player_type: str) -> tuple[str, str]:
