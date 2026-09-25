@@ -62,7 +62,13 @@ _NON_AD_CLASSES = {"twitch-trigger", "twitch-stream-source", "twitch-info"}
 # and instead reads `,live` as a *positive* content signal. The daterange rules
 # above are what actually catch stitched ads; this stays as a narrow assist for
 # a pod joined after its DATERANGE has scrolled out of the window.
-_AD_TITLE_RE = re.compile(r"(stitched-ad|twitch-ad)", re.IGNORECASE)
+#
+# `amazon|<creative id>` is the one Amazon form that is safe: it is exactly what
+# Twitch titles a stitched ad segment with (it mirrors the pod's
+# X-TV-TWITCH-STREAM-SOURCE, measured live in September 2026), and the pipe and
+# digits never appear in a stream name. It is what recognises a pod whose
+# daterange has already scrolled out of a backup token's window.
+_AD_TITLE_RE = re.compile(r"(stitched-ad|twitch-ad|^amazon\|\d)", re.IGNORECASE)
 
 # The inverse signal, from TTV-AB: Twitch tags real programme segments `,live`.
 # Used to hold the title heuristic back, never to classify something as an ad.

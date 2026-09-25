@@ -146,51 +146,138 @@ def fake_masters(ladders: dict[str, list], monkeypatch) -> list[str]:
     return minted
 
 
-async def test_the_whole_rotation_runs_in_one_call(monkeypatch):
-    """One call, every player type, concurrently.
-
-    This used to be one candidate per poll, because each one cost a streamlink
-    spawn of up to 8s. Minting tokens directly costs milliseconds, so a break is
-    covered by the first poll that notices it instead of the fourth.
-    """
-    state = adblock.BackupState()
-    minted = fake_masters(
-        {
-            "embed": [variant(1080, player_type="embed")],
-            "popout": [variant(1080, player_type="popout")],
-            "autoplay": [variant(360, 30.0, player_type="autoplay")],
-            "picture-by-picture": [variant(360, 30.0, player_type="picture-by-picture")],
-        },
-        monkeypatch,
-    )
-
-    async def fetch(url: str):
-        # Only `popout` is out of the break.
-        return 200, (CLEAN if "/popout/" in url else AD_MARKED)
-
-    found = await adblock.find_backup(
+async def refresh(state, fetch, **kwargs):
+    return await adblock.find_backup(
         login="chan",
         quality="best",
         native_player_type="web",
         state=state,
         fetch=fetch,
+        **kwargs,
     )
 
+
+def season(state) -> None:
+    """Stand in for the time a warm token has been watched without a preroll."""
+    for token in state.warm.values():
+        token.born_at -= adblock.SEASON_SECONDS + 1
+
+
+def full_ladders() -> dict[str, list]:
+    return {
+        "embed": [variant(1080, player_type="embed")],
+        "popout": [variant(1080, player_type="popout")],
+        "autoplay": [variant(360, 30.0, player_type="autoplay")],
+        "picture-by-picture": [variant(360, 30.0, player_type="picture-by-picture")],
+    }
+
+
+PREROLL_PLAYED_OUT = """#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:100
+#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-01-01T00:00:00.000Z",DURATION=4.0
+#EXTINF:2.000,Amazon|2474283100494
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/ad0.ts
+#EXTINF:2.000,Amazon|2474283100494
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/ad1.ts
+#EXTINF:2.000,live
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/seg102.ts
+#EXTINF:2.000,live
+https://video-weaver.b.hls.ttvnw.net/v1/playlist/seg103.ts
+"""
+
+
+def test_a_token_whose_preroll_has_played_out_is_usable():
+    """Its ad is still in the window; its live edge is content, which is what counts."""
+    assert adblock.judge(PREROLL_PLAYED_OUT, "https://x/") == (True, False)
+    assert adblock.judge(AD_MARKED, "https://x/") == (False, True)
+    assert adblock.judge(CLEAN, "https://x/") == (True, False)
+
+
+async def test_tokens_are_minted_once_and_then_only_watched(monkeypatch):
+    """A fresh token is clean for one fetch and then gets a preroll.
+
+    Minting on every search - the old design - meant every backup was a token
+    about to be stitched. The pool mints each type once and after that only
+    fetches its playlist, the way a viewer would, so the preroll plays out
+    while nothing depends on it.
+    """
+    minted = fake_masters(full_ladders(), monkeypatch)
+
+    async def fetch(url: str):
+        return 200, CLEAN
+
+    state = adblock.BackupState()
+    # The first refresh only mints: a first fetch proves nothing.
+    assert await refresh(state, fetch) is None
+    for _ in range(3):
+        await refresh(state, fetch)
+
+    assert sorted(minted) == sorted(adblock.BACKUP_PLAYER_TYPES)
+    assert "web" not in minted, "the native type must not be minted as its own backup"
+
+
+async def test_a_token_that_has_had_its_preroll_beats_a_fresh_one(monkeypatch):
+    """Even at a lower resolution: a fresh token will be stitched in seconds."""
+    fake_masters(full_ladders(), monkeypatch)
+
+    async def fetch(url: str):
+        return 200, CLEAN
+
+    state = adblock.BackupState()
+    await refresh(state, fetch)
+    state.warm["autoplay"].born_at -= adblock.SEASON_SECONDS + 1
+
+    found = await refresh(state, fetch)
+    assert found is not None
+    assert found.player_type == "autoplay"
+    assert found.seasoned is True
+
+    # Once the full-quality tokens have proven themselves too, picture wins.
+    season(state)
+    found = await refresh(state, fetch)
+    assert found.player_type == "embed"
+
+
+async def test_a_token_is_seasoned_by_playing_out_its_preroll(monkeypatch):
+    fake_masters({"embed": [variant(1080, player_type="embed")]}, monkeypatch)
+    answers = iter([CLEAN, AD_MARKED, PREROLL_PLAYED_OUT])
+
+    async def fetch(url: str):
+        return 200, next(answers)
+
+    state = adblock.BackupState()
+    await refresh(state, fetch)  # mint
+    first = await refresh(state, fetch)
+    assert first is not None and first.seasoned is False, "clean on first fetch proves nothing"
+    assert await refresh(state, fetch) is None, "a token carrying its preroll is not usable"
+    found = await refresh(state, fetch)
+    assert found is not None and found.seasoned is True
+    assert state.stitches == {"embed": 1}
+
+
+async def test_only_tokens_whose_live_edge_is_content_are_offered(monkeypatch):
+    fake_masters(full_ladders(), monkeypatch)
+
+    async def fetch(url: str):
+        # Only `popout` is out of the break.
+        return 200, (CLEAN if "/popout/" in url else AD_MARKED)
+
+    state = adblock.BackupState()
+    await refresh(state, fetch)
+    season(state)
+    found = await refresh(state, fetch)
     assert found is not None
     assert found.player_type == "popout"
-    assert set(minted) == set(adblock.BACKUP_PLAYER_TYPES), "the rotation was not walked"
-    assert "web" not in minted, "the native type must not be tried"
-    # The contaminated types are cooling down.
-    assert state.cooldowns.get("embed", 0) > 0
+
+    async def all_ads(url: str):
+        return 200, AD_MARKED
+
+    assert await refresh(state, all_ads) is None, "some breaks really are everywhere"
 
 
 async def test_the_backup_matches_the_picture_being_served(monkeypatch):
-    """A break must not change resolution.
-
-    Switching to a 360p copy and back is two buffer re-initialisations in the
-    player - the stutter this whole strategy exists to avoid - so a clean copy
-    at the same resolution and frame rate wins over a clean copy at any other.
-    """
+    """A break should not change resolution when a same-picture token is clean."""
     from app.services import twitch_playback
 
     native = variant(1080, player_type="native")
@@ -201,82 +288,8 @@ async def test_the_backup_matches_the_picture_being_served(monkeypatch):
     )
     fake_masters(
         {
-            "embed": [
-                variant(1080, player_type="embed"),
-                variant(360, 30.0, player_type="embed"),
-            ],
+            "embed": [variant(1080, player_type="embed"), variant(360, 30.0, player_type="embed")],
             "popout": [variant(360, 30.0, player_type="popout")],
-            "autoplay": [variant(360, 30.0, player_type="autoplay")],
-            "picture-by-picture": [variant(360, 30.0, player_type="picture-by-picture")],
-        },
-        monkeypatch,
-    )
-
-    async def fetch(url: str):
-        return 200, CLEAN  # every candidate is clean; only the picture differs
-
-    found = await adblock.find_backup(
-        login="chan",
-        quality="best",
-        native_player_type="web",
-        state=adblock.BackupState(),
-        fetch=fetch,
-        native_url=native.url,
-    )
-
-    assert found is not None
-    assert found.player_type == "embed"
-    # The 1080p rendition is the source group, which is spelled `best`.
-    assert found.quality == "best"
-    assert found.is_bridge is False, "a same-picture backup is not a bridge"
-
-
-async def test_a_degraded_backup_beats_a_black_screen(monkeypatch):
-    """When nothing matches, a smaller clean picture still beats a hold."""
-    from app.services import twitch_playback
-
-    native = variant(1080, player_type="native")
-    monkeypatch.setattr(twitch_playback, "variant_for_url", lambda url: native)
-    fake_masters(
-        {
-            "embed": [variant(1080, player_type="embed")],
-            "popout": [variant(1080, player_type="popout")],
-            "autoplay": [variant(360, 30.0, player_type="autoplay")],
-            "picture-by-picture": [variant(360, 30.0, player_type="picture-by-picture")],
-        },
-        monkeypatch,
-    )
-
-    async def fetch(url: str):
-        # The full-ladder types carry the ad; only the preview tiers are clean.
-        return 200, (AD_MARKED if ("/embed/" in url or "/popout/" in url) else CLEAN)
-
-    found = await adblock.find_backup(
-        login="chan",
-        quality="best",
-        native_player_type="web",
-        state=adblock.BackupState(),
-        fetch=fetch,
-        native_url=native.url,
-    )
-
-    assert found is not None
-    assert found.player_type in {"autoplay", "picture-by-picture"}
-    assert found.is_bridge is True, "a degraded backup must be marked for upgrading"
-
-
-async def test_the_upgrade_probe_will_not_settle_for_another_degraded_rendition(
-    monkeypatch,
-):
-    """Trading one low rendition for another buys a seam and no picture."""
-    from app.services import twitch_playback
-
-    native = variant(1080, player_type="native")
-    monkeypatch.setattr(twitch_playback, "variant_for_url", lambda url: native)
-    fake_masters(
-        {
-            "embed": [variant(720, player_type="embed")],
-            "popout": [variant(480, 30.0, player_type="popout")],
             "autoplay": [variant(360, 30.0, player_type="autoplay")],
             "picture-by-picture": [variant(360, 30.0, player_type="picture-by-picture")],
         },
@@ -286,69 +299,53 @@ async def test_the_upgrade_probe_will_not_settle_for_another_degraded_rendition(
     async def fetch(url: str):
         return 200, CLEAN
 
-    found = await adblock.find_backup(
-        login="chan",
-        quality="best",
-        native_player_type="web",
-        state=adblock.BackupState(),
-        fetch=fetch,
-        native_url=native.url,
-        full_quality_only=True,
-    )
-
-    assert found is None, "nothing matched the session picture, so nothing was promoted"
-
-
-async def test_the_search_gives_up_when_every_type_carries_the_ad(monkeypatch):
-    """Some breaks really are everywhere; the caller then holds."""
     state = adblock.BackupState()
-    fake_masters(
-        {pt: [variant(720, player_type=pt)] for pt in adblock.BACKUP_PLAYER_TYPES},
-        monkeypatch,
-    )
+    await refresh(state, fetch, native_url=native.url)
+    season(state)
+    found = await refresh(state, fetch, native_url=native.url)
+
+    assert found is not None
+    assert found.player_type == "embed"
+    assert found.quality == "best"
+    assert found.is_bridge is False, "a same-picture backup is not a bridge"
+    assert state.warm["autoplay"].is_bridge is True, "a degraded copy must be marked"
+
+
+async def test_the_active_backup_is_never_offered_as_its_own_replacement(monkeypatch):
+    fake_masters(full_ladders(), monkeypatch)
 
     async def fetch(url: str):
-        return 200, AD_MARKED
+        return 200, CLEAN
 
-    assert (
-        await adblock.find_backup(
-            login="chan",
-            quality="best",
-            native_player_type="web",
-            state=state,
-            fetch=fetch,
-        )
-        is None
-    )
-
-    # Having walked the whole rotation with nothing clean, it stops searching for
-    # a moment rather than re-minting tokens on every poll of the break.
-    assert state.exhausted_until > 0
+    state = adblock.BackupState()
+    await refresh(state, fetch)
+    season(state)
+    first = await refresh(state, fetch)
+    state.active = first
+    second = await refresh(state, fetch)
+    assert second is not None and second.url != first.url
 
 
-async def test_a_dead_variant_url_invalidates_the_cached_master(monkeypatch):
-    """A stale usher url is the master's fault, not the player type's.
-
-    Penalising the type would remove a perfectly good backup from the rotation
-    for the rest of the break; dropping the cached master makes the next attempt
-    mint a fresh token instead.
-    """
+async def test_an_expired_token_is_dropped_and_re_minted(monkeypatch):
+    """A dead variant url is the token's age, not the player type's fault."""
     from app.services import twitch_playback
 
     dropped: list[tuple] = []
     monkeypatch.setattr(
         twitch_playback, "invalidate", lambda *args, **kwargs: dropped.append(args)
     )
-    fake_masters({"embed": [variant(720, player_type="embed")]}, monkeypatch)
+    minted = fake_masters({"embed": [variant(720, player_type="embed")]}, monkeypatch)
 
-    async def fetch(url: str):
+    async def dead(url: str):
         return 403, ""
 
-    await adblock.find_backup(
-        login="chan",
-        quality="best",
-        native_player_type="web",
-        state=adblock.BackupState(),
-        fetch=fetch,
-    )
+    state = adblock.BackupState()
+    await refresh(state, dead)
+    for _ in range(adblock.MAX_WARM_FAILURES):
+        await refresh(state, dead)
     assert dropped, "the cached master survived a dead variant url"
+    assert "embed" not in state.warm
+
+    state.cooldowns.clear()
+    await refresh(state, dead)
+    assert minted.count("embed") == 2
