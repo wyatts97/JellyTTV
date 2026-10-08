@@ -44,6 +44,21 @@ router = APIRouter(prefix="/api/watch", tags=["watch"])
 
 WatchMode = Literal["bridged", "adfree"]
 
+# How far (in seconds of stream) the served timeline may fall behind native's
+# live edge while a break waits for a clean backup, before it is held on black.
+# One segment: enough for the next poll's pool refresh to land, so a backup
+# found one poll late still covers the break from its first segment instead of
+# following a hold. The player sits LIVE_SYNC_SECONDS (8s) behind the
+# playlist's end, so even with a poll's delay on top this leaves it seconds of
+# buffer.
+WEB_HOLD_GRACE_SECONDS = 2.5
+
+# Twitch declares a 6s target for 2s segments, and hls.js reloads a live
+# playlist once per target. The session only advances when it is polled, so
+# that was up to 6s before a break was even noticed - and three segments of it
+# arriving at once, all held because nothing had been checked in between.
+WEB_TARGET_DURATION = 2.0
+
 
 def web_policy(settings: ResolvedSettings, mode: WatchMode) -> PlaybackPolicy:
     ad_free = mode == "adfree"
@@ -54,6 +69,8 @@ def web_policy(settings: ResolvedSettings, mode: WatchMode) -> PlaybackPolicy:
         hold=not ad_free,
         ad_spoofing=settings.row.ad_spoofing,
         direct_playback=settings.row.direct_playback,
+        hold_grace=WEB_HOLD_GRACE_SECONDS,
+        target_duration=WEB_TARGET_DURATION,
     )
 
 

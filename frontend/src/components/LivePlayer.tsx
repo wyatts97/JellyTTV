@@ -46,6 +46,12 @@ const STALL_SEEK_MS = 6_000
 const STALL_REBUILD_MS = 15_000
 // A nudge that did not help must not be repeated every sample.
 const STALL_NUDGE_REPEAT_MS = 5_000
+// Stuck at the end of one buffered range with the next one just ahead: the seam
+// between two sources left a hole. hls.js only jumps holes up to maxBufferHole
+// on its own, so a wider one stalled until the seek below - ten seconds of a
+// frozen picture with the clean stream already buffered past it.
+const STALL_SKIP_MS = 1_000
+const STALL_SKIP_MAX_GAP_S = 6
 // During a break the source is being switched underneath the player, and a
 // nudge mid-switch fights it. Give a break longer before intervening.
 const AD_BREAK_GRACE_MS = 4_000
@@ -76,6 +82,18 @@ function levelLabel(level: { height?: number; bitrate?: number; attrs?: Record<s
   if (!level.height) return `${Math.round((level.bitrate ?? 0) / 1000)}k`
   const fps = Number(level.attrs?.['FRAME-RATE'])
   return `${level.height}p${Number.isFinite(fps) && fps >= 50 ? '60' : ''}`
+}
+
+/** Start of the next buffered range, when nothing playable lies between here and it. */
+function bufferedPastHole(video: HTMLVideoElement): number | null {
+  const now = video.currentTime
+  const ranges = video.buffered
+  for (let i = 0; i < ranges.length; i++) {
+    if (ranges.start(i) <= now) continue
+    const playableUntil = i > 0 ? ranges.end(i - 1) : now
+    return playableUntil - now < 0.5 ? ranges.start(i) : null
+  }
+  return null
 }
 
 export function LivePlayer({
@@ -349,6 +367,18 @@ export function LivePlayer({
       }
 
       const stuckFor = Date.now() - lastAdvance
+      const pastHole = bufferedPastHole(video)
+      if (
+        stuckFor > STALL_SKIP_MS &&
+        pastHole !== null &&
+        pastHole - video.currentTime < STALL_SKIP_MAX_GAP_S
+      ) {
+        // No ad-break grace: this is the one stall a break makes likelier.
+        lastAdvance = Date.now()
+        video.currentTime = pastHole + 0.1
+        void video.play().catch(() => undefined)
+        return
+      }
       const grace = inAdBreak.current ? AD_BREAK_GRACE_MS : 0
       if (stuckFor > STALL_REBUILD_MS + grace) {
         lastAdvance = Date.now()

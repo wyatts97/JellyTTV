@@ -492,12 +492,20 @@ def candidate(url: str = BACKUP_URL, player_type: str = "embed", **kwargs):
     )
 
 
-async def run_polls(world: BackupWorld, count: int, *, find_backup, age_backup: bool = False):
+async def run_polls(
+    world: BackupWorld,
+    count: int,
+    *,
+    find_backup,
+    age_backup: bool = False,
+    **options,
+):
     """Poll the session `count` times against a BackupWorld.
 
     `age_backup` moves the active backup's promotion back by BRIDGE_HOLD_SECONDS
     after every poll, standing in for the real time that passes between polls,
-    so a low-quality backup is eligible to be traded up.
+    so a low-quality backup is eligible to be traded up. `options` go to
+    `get_playlist` as they are.
     """
     resolve, _ = make_resolve()
     renders, serving, holds = [], [], []
@@ -511,6 +519,7 @@ async def run_polls(world: BackupWorld, count: int, *, find_backup, age_backup: 
                 fetch=world.fetch,
                 backup=find_backup,
                 hold_uri=hold_uri,
+                **options,
             )
         )
         session = stream_session.get("adapt", "best")
@@ -548,7 +557,7 @@ async def test_an_ad_break_plays_a_backup_stream_instead_of_dead_air():
     world.mirror(BACKUP_URL)
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        return candidate()
+        return [candidate()]
 
     renders, _, _ = await run_polls(world, len(native), find_backup=find_backup)
 
@@ -584,7 +593,7 @@ async def test_a_break_is_covered_from_its_first_ad_segment_not_a_full_window():
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return candidate(player_type="picture-by-picture")
+        return [candidate(player_type="picture-by-picture")]
 
     renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
 
@@ -610,13 +619,13 @@ async def test_the_warm_pool_is_refreshed_on_every_poll_and_its_verdict_is_trust
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return candidate() if searches["n"] < 3 else None
+        return [candidate()] if searches["n"] < 3 else []
 
     renders, _ = await poll_all(native, backup=find_backup)
 
     assert searches["n"] == len(native)
     assert all(r.backup_player_type is None for r in renders)
-    assert stream_session.get("adapt", "best").spare is None
+    assert stream_session.get("adapt", "best").spares == []
 
 
 async def test_a_spare_stitched_since_it_was_found_is_discarded_not_spliced():
@@ -644,7 +653,7 @@ async def test_a_spare_stitched_since_it_was_found_is_discarded_not_spliced():
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
         url = stale_url if searches["n"] == 1 else BACKUP_URL
-        return candidate(url, player_type="picture-by-picture")
+        return [candidate(url, player_type="picture-by-picture")]
 
     renders, _, _ = await run_polls(world, len(native), find_backup=find_backup)
     session = stream_session.get("adapt", "best")
@@ -671,7 +680,7 @@ async def test_native_resumes_only_after_several_clean_polls():
     world.mirror(BACKUP_URL)
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        return candidate()
+        return [candidate()]
 
     renders, serving, _ = await run_polls(world, len(native), find_backup=find_backup)
 
@@ -965,8 +974,8 @@ async def test_a_low_quality_backup_is_upgraded_once_a_full_quality_token_is_usa
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         refreshes["n"] += 1
         if refreshes["n"] <= 3:
-            return candidate(low, player_type="autoplay", is_bridge=True)
-        return candidate(full)
+            return [candidate(low, player_type="autoplay", is_bridge=True)]
+        return [candidate(full)]
 
     renders, _, holds = await run_polls(
         world, len(native), find_backup=find_backup, age_backup=True
@@ -1000,8 +1009,8 @@ async def test_an_upgrade_that_fails_its_check_keeps_the_low_quality_backup():
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         refreshes["n"] += 1
         if refreshes["n"] == 1:
-            return candidate(low, player_type="autoplay", is_bridge=True)
-        return candidate(full)
+            return [candidate(low, player_type="autoplay", is_bridge=True)]
+        return [candidate(full)]
 
     renders, _, holds = await run_polls(
         world, len(native), find_backup=find_backup, age_backup=True
@@ -1044,7 +1053,7 @@ async def test_a_stitched_backup_is_handed_over_to_the_spare_within_the_same_pol
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return candidate(first if searches["n"] == 1 else second)
+        return [candidate(first if searches["n"] == 1 else second)]
 
     renders, _, holds = await run_polls(
         world, len(native), find_backup=find_backup, age_backup=True
@@ -1083,7 +1092,7 @@ async def test_a_warm_token_still_showing_its_played_out_preroll_is_spliced():
     )
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
-        return candidate()
+        return [candidate()]
 
     renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
 
@@ -1133,7 +1142,7 @@ async def test_falling_back_to_holds_never_re_holds_time_a_backup_already_covere
 
     async def find_backup(state, quality, full_quality_only=False, native_url=None):
         searches["n"] += 1
-        return candidate() if searches["n"] == 1 else None
+        return [candidate()] if searches["n"] == 1 else []
 
     renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
 
@@ -1143,3 +1152,141 @@ async def test_falling_back_to_holds_never_re_holds_time_a_backup_already_covere
     assert holds[-1] > 0, "the lost backup should have been covered by holds"
     assert "/ad1" not in "\n".join(r.text for r in renders)
     assert_playlist_continuity([r.text for r in renders])
+
+
+# ------------------------------------------- covering a break without black
+async def test_a_stitched_favourite_falls_through_to_the_next_clean_spare():
+    """The 6s of black at the start of a channel midroll.
+
+    A midroll is stitched into every web token within a second or two of the
+    native stream, so the pool's favourite from the last poll - `embed`, same
+    picture - is routinely dirty by the poll that needs it. Only that one used
+    to be checked, and the break was held on black while `autoplay`, which is
+    never stitched, sat clean one place down the list. Observed live: six holds,
+    then `autoplay` spliced one poll later.
+    """
+    native = [
+        build_playlist(start_seq=100, count=4),
+        build_playlist(start_seq=102, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
+        build_playlist(start_seq=106, count=4, ad_at=104, ad_len=12, ad_duration=24.0),
+    ]
+    stitched = "https://video-weaver.c.hls.ttvnw.net/embed.m3u8"
+    world = BackupWorld(native)
+    world.behaviour[stitched] = lambda n, seq, count: AD_MARKED_BACKUP.format(
+        seq=seq, seq2=seq + 1
+    )
+    world.mirror(BACKUP_URL)
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        return [
+            candidate(stitched, player_type="embed"),
+            candidate(player_type="autoplay", is_bridge=True),
+        ]
+
+    renders, _, holds = await run_polls(world, len(native), find_backup=find_backup)
+
+    assert renders[1].backup_player_type == "autoplay", "the clean spare was not tried"
+    assert "bak104.ts" in renders[1].text, "the break was not covered from its start"
+    assert holds[-1] == 0, "a break with a clean spare showed black"
+    assert "bakad" not in "\n".join(r.text for r in renders)
+    assert_playlist_continuity([r.text for r in renders])
+
+
+def one_segment_per_poll(polls: int) -> list[str]:
+    """Native as the web player now sees it: a poll per segment, a break at 104."""
+    return [
+        build_playlist(start_seq=97 + i, count=4, ad_at=104, ad_len=50, ad_duration=100.0)
+        for i in range(polls)
+    ]
+
+
+async def test_the_hold_grace_lets_a_late_backup_cover_the_break_from_its_start():
+    """A hold is on screen for as long as the ad it replaces.
+
+    Committed the moment the ad appeared, it could only ever be followed by a
+    backup - never replaced by one - so a search that landed one poll late cost
+    the viewer that whole poll of black. With a grace, the break waits for the
+    backup without appending anything, and the backup then covers the very
+    moments the ad stood for.
+    """
+    native = one_segment_per_poll(8)
+    world = BackupWorld(native)
+    world.mirror(BACKUP_URL)
+    searches = {"n": 0}
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        searches["n"] += 1
+        # Nothing usable for the poll the break begins on; usable for the next.
+        return [candidate(player_type="autoplay", is_bridge=True)] if searches["n"] > 4 else []
+
+    renders, _, holds = await run_polls(
+        world, len(native), find_backup=find_backup, hold_grace=2.5
+    )
+
+    # Poll 4 is the first to carry the break.
+    assert renders[4].segment_count == renders[3].segment_count, "the ad poll appended something"
+    assert renders[5].backup_player_type == "autoplay"
+    assert "bak104.ts" in renders[5].text, "the backup did not cover the start of the break"
+    assert holds[-1] == 0, "the break was held although a backup arrived inside the grace"
+    assert "/ad1" not in "\n".join(r.text for r in renders), "an ad reached the player"
+    assert_playlist_continuity([r.text for r in renders])
+    for text in (r.text for r in renders):
+        assert_no_unmarked_hole(text)
+
+
+async def test_the_hold_grace_still_holds_a_break_nothing_can_cover():
+    """Waiting is bounded in stream time, and then the break is held as before.
+
+    The served timeline never falls more than the grace behind native's live
+    edge - one segment here - which is all the player's buffer pays for it.
+    """
+    native = one_segment_per_poll(8)
+    world = BackupWorld(native)
+
+    async def find_backup(state, quality, full_quality_only=False, native_url=None):
+        return []
+
+    renders, _, holds = await run_polls(
+        world, len(native), find_backup=find_backup, hold_grace=2.5
+    )
+
+    assert holds[4] == 0, "the first ad segment was held without waiting"
+    # From then on each poll holds the segment before the one it waits on.
+    assert holds[5:] == [2, 4, 6], f"holds per poll: {holds}"
+    assert "/ad1" not in "\n".join(r.text for r in renders)
+    assert_playlist_continuity([r.text for r in renders])
+
+
+async def test_a_browser_is_told_the_real_segment_length_and_it_never_shrinks():
+    """Twitch's 6s target made the web player poll every 6s.
+
+    The session only advances when it is polled, so a break went unnoticed for
+    up to 6s and then arrived three segments at a time. The web player declares
+    the real segment length instead; a longer segment raises it, and it does
+    not come back down once that segment scrolls away.
+    """
+    stretched = build_playlist(start_seq=100, count=4).replace(
+        "#EXTINF:2.000,", "#EXTINF:2.600,", 1
+    )
+    playlists = [build_playlist(start_seq=96, count=4), stretched] + [
+        build_playlist(start_seq=104 + 4 * i, count=4) for i in range(6)
+    ]
+    playlists = [p.replace("#EXT-X-TARGETDURATION:2", "#EXT-X-TARGETDURATION:6") for p in playlists]
+    fetch, _ = make_fetch(playlists)
+    resolve, _ = make_resolve()
+    declared = []
+    for _ in playlists:
+        render = await stream_session.get_playlist(
+            login="adapt",
+            quality="best",
+            strip_ads=True,
+            resolve=resolve,
+            fetch=fetch,
+            target_duration=2.0,
+        )
+        stream_session.get("adapt", "best").last_render_at = 0.0
+        declared.append(int(re.search(r"#EXT-X-TARGETDURATION:(\d+)", render.text).group(1)))
+
+    assert declared[0] == 2, "upstream's 6s target was passed through"
+    assert declared[1] == 3, "a 2.6s segment was understated"
+    assert declared[-1] == 3, "the declared target shrank mid-session"

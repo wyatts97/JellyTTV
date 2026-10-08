@@ -78,10 +78,10 @@ RENDER_CACHE_SECONDS = 1.0
 # Consecutive fetch failures before a backup is dropped. One is a hiccup.
 MAX_BACKUP_FAILURES = 2
 
-# The spare: the warm pool's best token for covering a break right now (see
-# services.adblock). The pool is refreshed on every poll, so the spare always
-# reflects what each token's playlist said moments ago, and neither the start
-# of a break nor a hand-over mid-break has to wait for a search.
+# The spares: every warm-pool token usable for covering a break right now, best
+# first (see services.adblock). The pool is refreshed on every poll, so they
+# always reflect what each token's playlist said moments ago, and neither the
+# start of a break nor a hand-over mid-break has to wait for a search.
 
 # How far behind the served timeline a source's newest segment may be before
 # its clock is assumed not to agree with ours and the timeline is re-based on
@@ -111,14 +111,14 @@ _DEAD_STATUSES = frozenset({0, 400, 403, 404, 410})
 # different weaver node whose numbering does not continue the old one's.
 Resolver = Callable[[], Awaitable[str]]
 
-# Finds the same channel on a different player type, returning a candidate whose
-# playlist is verified clean, or None when every type is carrying the ad. The
-# bool is `full_quality_only`: set for the upgrade probe that runs behind an
-# active low-quality bridge, which must not settle for a second degraded
-# rendition. The last argument is the url being served, so the search can match
-# its picture.
+# Finds the same channel on other player types, returning every candidate whose
+# playlist is clean at its live edge, best first - empty when every type is
+# carrying the ad. The bool is `full_quality_only`: set for the upgrade probe
+# that runs behind an active low-quality bridge, which must not settle for a
+# second degraded rendition. The last argument is the url being served, so the
+# search can match its picture.
 BackupFinder = Callable[
-    [BackupState, str, bool, str | None], Awaitable[BackupCandidate | None]
+    [BackupState, str, bool, str | None], Awaitable[list[BackupCandidate]]
 ]
 
 # Builds the url of our own hold segment for a given sequence number. Injected
@@ -150,7 +150,7 @@ def _start_backup_search(
 ) -> asyncio.Task | None:
     """Kick off one backup search in the background, if none is running.
 
-    Whatever it finds lands in `session.spare`, which is the one place every
+    Whatever it finds lands in `session.spares`, which is the one place every
     consumer takes a candidate from - the start of a break, a hand-over when the
     active backup is stitched, a bridge upgrade. There used to be a separate
     pool, a prefetch result parked in the task handle and an upgrade result,
@@ -160,23 +160,23 @@ def _start_backup_search(
     if _search_in_flight(session):
         return None
 
-    async def search() -> BackupCandidate | None:
+    async def search() -> list[BackupCandidate]:
         try:
             # The served url tells the search which picture to match.
-            candidate = await backup(
+            candidates = await backup(
                 session.backup, session.quality, full_quality_only, session.upstream_url
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a failed search is just no candidate
             log.warning("backup search failed", login=session.login, error=str(exc)[:200])
-            candidate = None
+            candidates = []
         finally:
             session.backup.searching = False
         # Always published, "nothing usable" included: the pool judges every
         # token live, and a spare it no longer vouches for must not linger.
-        session.spare = candidate
-        return candidate
+        session.spares = list(candidates or [])
+        return session.spares
 
     session.backup.searching = True
     task = asyncio.create_task(search())
@@ -301,9 +301,8 @@ class StreamSession:
     serving_backup: bool = False
     clean_native_polls: int = 0
 
-    # A clean candidate held ready for the next time one is needed. See
-    # SPARE_MAX_AGE.
-    spare: BackupCandidate | None = None
+    # Clean candidates held ready for the next time one is needed, best first.
+    spares: list[BackupCandidate] = field(default_factory=list)
     # Ad dateranges seen on the active backup, remembered for the same reason
     # the native ones are, but kept apart: a pod on one token says nothing about
     # what another token is carrying at that moment.
@@ -332,6 +331,10 @@ class StreamSession:
     holding: bool = False
 
     target_duration: float = 2.0
+    # The client's override of upstream's TARGETDURATION, and the largest value
+    # ever declared - the declared target never shrinks mid-session.
+    target_override: float | None = None
+    declared_target: float = 0.0
     version: int = 3
     passthrough_tags: list[str] = field(default_factory=list)
 
@@ -392,10 +395,11 @@ class StreamSession:
             ),
             "bridge_upgrades": self.bridge_upgrades,
             "holding": self.holding,
-            # The candidate held ready for the next hand-over. A break that
-            # starts with none of these is the one that shows black.
-            "spare_player_type": self.spare.player_type if self.spare else None,
-            "spare_seasoned": self.spare.seasoned if self.spare else None,
+            # The candidates held ready for the next hand-over, best first. A
+            # break that starts with none of these is the one that shows black.
+            "spare_player_type": self.spares[0].player_type if self.spares else None,
+            "spare_seasoned": self.spares[0].seasoned if self.spares else None,
+            "spare_player_types": [c.player_type for c in self.spares],
             # Every warm backup token and what its last fetch said. A break with
             # none usable here is one that shows black.
             "warm_backups": [t.snapshot(now) for t in self.backup.warm.values()],
@@ -594,17 +598,27 @@ def _advance(
     now: float,
     hold_uri: HoldUri | None = None,
     source: str = "native",
+    hold_grace: float = 0.0,
 ) -> int:
     """Fold one poll into the session. Returns the number of segments removed.
 
-    With `hold_uri`, a stripped ad segment is not dropped but *replaced*, the
-    moment it first appears, by the same length of hold segments. Dropping it
-    was the freeze at the start of every break: a break begins at the live edge
-    while real content is still in the window, so the pod was cut out, nothing
-    new was appended, and the playlist stood still for the ~30s it took the ads
-    to fill the whole window - by which time the player had long run dry. The
-    replacement keeps the timeline growing at exactly real time, however the
-    break lines up with the window.
+    With `hold_uri`, a stripped ad segment is not dropped but *replaced* by the
+    same length of hold segments. Dropping it was the freeze at the start of
+    every break: a break begins at the live edge while real content is still in
+    the window, so the pod was cut out, nothing new was appended, and the
+    playlist stood still for the ~30s it took the ads to fill the whole window -
+    by which time the player had long run dry. The replacement keeps the
+    timeline growing at real time, however the break lines up with the window.
+
+    `hold_grace` lets that replacement wait, for a client that sits far enough
+    behind the edge to afford it. A hold committed the moment the ad appears is
+    on screen for the whole length of that ad, even when a clean backup turns
+    up on the very next poll - it can only cover what comes after the time
+    already held. Waiting lets that backup cover the break from its first
+    segment instead. The wait is bounded in media time, not wall time: an ad is
+    left unheld only while the served timeline is within `hold_grace` seconds
+    of native's live edge, which is exactly what it costs the player's buffer
+    however the polls happen to fall.
     """
     rewriter = rewrite_uri or (lambda u: u)
 
@@ -624,6 +638,14 @@ def _advance(
     removed = sum(1 for s in parsed.segments if s.is_ad) if strip_ads else 0
 
     _check_clock(session, parsed)
+    live_edge = max(
+        (
+            s.program_date_epoch + s.duration
+            for s in parsed.segments
+            if s.program_date_epoch is not None
+        ),
+        default=None,
+    )
     prev_index: int | None = None
     for seg in kept:
         key = segment_key(seg, session.generation)
@@ -635,6 +657,16 @@ def _advance(
             session.last_pdt_duration = seg.duration
             continue
         if substitute and seg.is_ad:
+            if (
+                hold_grace > 0
+                and live_edge is not None
+                and session.timeline_end is not None
+                and live_edge - session.timeline_end <= hold_grace
+            ):
+                # Still waiting on a backup. Nothing after this segment may be
+                # folded before it, or the time it stands for would be skipped
+                # instead of covered.
+                break
             _append_hold_for(session, hold_uri, seg.duration, now)
             session.seen[key] = (session.next_seq - 1, now + SEEN_TTL)
             _extend_timeline(session, seg, ad=True)
@@ -776,14 +808,31 @@ def _end_hold(session: StreamSession) -> None:
         session.pending_discontinuity = True
 
 
+async def _verify_spare(
+    session: StreamSession, candidate: BackupCandidate, fetch: Fetcher, now: float
+) -> tuple[str, str | None]:
+    """Fetch a spare now: (playlist, why it is unusable or None)."""
+    status, playlist = await fetch(candidate.url)
+    if status != 200 or not playlist:
+        return playlist, f"status-{status}"
+    parsed = hls.parse_media_playlist(
+        playlist, candidate.url, strip_ads=True, now=now, trust_titles=session.trust_titles
+    )
+    if not parsed.segments:
+        return playlist, "not-playable"
+    if parsed.ends_in_ad or _has_uncovered_ads(session, parsed):
+        return playlist, "ad-marked"
+    return playlist, None
+
+
 async def _take_spare(
     session: StreamSession,
     fetch: Fetcher,
     now: float,
     *,
-    full_quality_only: bool = False,
+    eligible: Callable[[BackupCandidate], bool] | None = None,
 ) -> tuple[BackupCandidate, str] | None:
-    """Claim the spare, re-checked against its playlist *now*.
+    """Claim the best spare that is still clean, re-checked against its playlist *now*.
 
     Returns the candidate and the playlist that proved it usable, so the caller
     can serve from that fetch instead of making another. The check is the same
@@ -791,35 +840,40 @@ async def _take_spare(
     advertising for time the session has not served yet. An ad further back in
     its window - the preroll a warm token played out before the break - is in
     time already on screen, and costs nothing.
+
+    Every eligible spare is checked at once, not just the best. A channel
+    midroll lands on every web token within a second or two of the native
+    stream, so the pool's favourite from the last poll is routinely dirty by
+    the poll that needs it - and only checking that one is what held breaks on
+    black while `autoplay`, never stitched, waited one place down the list.
     """
-    candidate = session.spare
-    if candidate is None:
+    candidates = [c for c in session.spares if eligible is None or eligible(c)]
+    if not candidates:
         return None
-    if full_quality_only and candidate.is_bridge:
-        return None
-    session.spare = None
-    status, playlist = await fetch(candidate.url)
-    reason = None
-    if status != 200 or not playlist:
-        reason = f"status-{status}"
-    else:
-        parsed = hls.parse_media_playlist(
-            playlist, candidate.url, strip_ads=True, now=now, trust_titles=session.trust_titles
-        )
-        if not parsed.segments:
-            reason = "not-playable"
-        elif parsed.ends_in_ad or _has_uncovered_ads(session, parsed):
-            reason = "ad-marked"
-    if reason is not None:
-        log.info(
-            "discarding backup candidate (no longer clean)",
-            login=session.login,
-            player_type=candidate.player_type,
-            age=round(candidate.age(now), 1),
-            reason=reason,
-        )
-        return None
-    return candidate, playlist
+    verdicts = await asyncio.gather(*(_verify_spare(session, c, fetch, now) for c in candidates))
+
+    taken: tuple[BackupCandidate, str] | None = None
+    rejected: list[BackupCandidate] = []
+    for candidate, (playlist, reason) in zip(candidates, verdicts, strict=True):
+        if reason is not None:
+            rejected.append(candidate)
+            log.info(
+                "discarding backup candidate (no longer clean)",
+                login=session.login,
+                player_type=candidate.player_type,
+                age=round(candidate.age(now), 1),
+                reason=reason,
+            )
+        elif taken is None:
+            taken = (candidate, playlist)
+    # The ones that passed stay on offer for a hand-over; the pool's next
+    # refresh replaces the whole list anyway.
+    session.spares = [
+        c
+        for c in session.spares
+        if not any(c is r for r in rejected) and (taken is None or c is not taken[0])
+    ]
+    return taken
 
 
 def _promote(session: StreamSession, candidate: BackupCandidate, now: float) -> None:
@@ -865,11 +919,14 @@ async def _maybe_upgrade_bridge(
         return
     if now - session.backup_promoted_at < BRIDGE_HOLD_SECONDS:
         return
-    spare = session.spare
-    if spare is None or spare.is_bridge or not spare.seasoned:
+
+    def upgrade(candidate: BackupCandidate) -> bool:
+        return not candidate.is_bridge and candidate.seasoned
+
+    if not any(upgrade(c) for c in session.spares):
         return
     session.bridge_upgrades += 1
-    taken = await _take_spare(session, fetch, now, full_quality_only=True)
+    taken = await _take_spare(session, fetch, now, eligible=upgrade)
     if taken is None:
         return
     candidate = taken[0]
@@ -1026,7 +1083,7 @@ async def _serve_backup(
                 player_type=active.player_type,
                 served_polls=session.backup_served_polls,
                 served_seconds=round(now - session.backup_promoted_at, 1),
-                spare=session.spare.player_type if session.spare else None,
+                spares=[c.player_type for c in session.spares],
             )
             _drop_backup(session, active, "ad-marked", now)
 
@@ -1110,9 +1167,15 @@ def _render(session: StreamSession) -> PlaylistRender:
         media_sequence = session.last_media_sequence
     session.last_media_sequence = media_sequence
 
+    target = (
+        session.target_duration if session.target_override is None else session.target_override
+    )
+    longest = max((s.duration for s in session.window), default=0.0)
+    session.declared_target = max(session.declared_target, target, longest)
+
     text = hls.render_media_playlist(
         list(session.window),
-        target_duration=session.target_duration,
+        target_duration=session.declared_target,
         media_sequence=media_sequence,
         discontinuity_sequence=session.discontinuity_seq,
         version=session.version,
@@ -1244,6 +1307,8 @@ async def get_playlist(
     backup: BackupFinder | None = None,
     report_ads: AdReporter | None = None,
     hold_uri: HoldUri | None = None,
+    hold_grace: float = 0.0,
+    target_duration: float | None = None,
 ) -> PlaylistRender:
     """Return the client-facing playlist for this channel, advancing the session.
 
@@ -1264,6 +1329,12 @@ async def get_playlist(
     `backup` enables TTV-AB-style substitution and `hold_uri` supplies the hold
     segment's url; both are None only on paths with no ad handling at all, and
     without them a break falls back to passing the ad through.
+
+    `hold_grace` is how far behind native's live edge, in seconds of stream,
+    the timeline may fall while a break waits for a backup before it is held
+    (see `_advance`), and `target_duration` replaces upstream's
+    declared TARGETDURATION; both exist for a browser player, and are left at
+    their defaults for ffmpeg.
     """
     key = session_key(login, quality, variant)
     session = await _get_or_create(key, login, quality)
@@ -1271,6 +1342,7 @@ async def get_playlist(
     async with session.lock:
         now = time.monotonic()
         session.last_access = now
+        session.target_override = target_duration
 
         if session.last_rendered and now - session.last_render_at < RENDER_CACHE_SECONDS:
             session.stats.repeated_renders += 1
@@ -1363,6 +1435,8 @@ async def get_playlist(
                 rewrite_uri=rewrite_uri,
                 now=now,
                 hold_uri=hold_uri,
+                # Only while there is anything to wait for.
+                hold_grace=hold_grace if backup is not None else 0.0,
             )
             held = True
 
@@ -1589,6 +1663,8 @@ def _clone(session: StreamSession) -> StreamSession:
     clone.consecutive_ad_polls = session.consecutive_ad_polls
     clone.trust_titles = session.trust_titles
     clone.target_duration = session.target_duration
+    clone.target_override = session.target_override
+    clone.declared_target = session.declared_target
     clone.version = session.version
     clone.passthrough_tags = list(session.passthrough_tags)
     clone.last_rendered = session.last_rendered

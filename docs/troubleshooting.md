@@ -206,8 +206,11 @@ same break there is nothing to switch to, and the hold is what plays.
 
 `GET /api/debug/hls/sessions` separates the two cases:
 
-- `stats.backup_polls` climbing → breaks are being covered. A short black gap at
-  the start of a break, while the search runs, is normal.
+- `stats.backup_polls` climbing → breaks are being covered. Every warm token in
+  `spare_player_types` is re-checked on the poll that sees the break and the
+  best clean one is spliced in there and then, so in the built-in player a
+  break with any clean token shows no black at all. Black at the start of a
+  break means none of them was clean at that moment.
 - `stats.hold_segments` climbing for the whole break, with `backup_exhausted`
   true → nothing clean exists for this channel right now.
 - `serving_bridge` true → the break is covered, but by a lower-quality

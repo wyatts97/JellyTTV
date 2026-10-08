@@ -317,7 +317,13 @@ async def _check(state: BackupState, token: WarmToken, fetch, login: str) -> Non
     token.usable = usable
 
 
-async def find_backup(
+async def find_backup(**kwargs) -> BackupCandidate | None:
+    """The single best token usable right now. See `find_backups`."""
+    ranked = await find_backups(**kwargs)
+    return ranked[0] if ranked else None
+
+
+async def find_backups(
     *,
     login: str,
     quality: str,
@@ -328,8 +334,8 @@ async def find_backup(
     device_id: str | None = None,
     full_quality_only: bool = False,
     native_url: str | None = None,
-) -> BackupCandidate | None:
-    """Refresh the warm pool and return the best token usable right now.
+) -> list[BackupCandidate]:
+    """Refresh the warm pool and return every token usable right now, best first.
 
     Called on every poll of a session, which is what keeps the pool warm: each
     token's playlist is fetched as a viewer's would be, so its preroll plays
@@ -341,6 +347,12 @@ async def find_backup(
     same picture as the native stream, then the largest picture, then the
     preference order of BACKUP_PLAYER_TYPES. The session's active backup is
     never offered as its own replacement.
+
+    All of them, not just the best, because a channel midroll is stitched into
+    every web token at once: the best-ranked one is routinely the first to go
+    dirty at the very poll that needs it, while `autoplay` - never stitched -
+    sits one place down the list. Offering only the best is what held whole
+    breaks on black with a clean token in the pool.
     """
     now = time.monotonic()
     state.searches += 1
@@ -385,8 +397,6 @@ async def find_backup(
         and token.player_type != native_player_type
         and not (full_quality_only and token.is_bridge)
     ]
-    if not usable:
-        return None
 
     def rank(token: WarmToken):
         seasoned = token.seasoned(now)
@@ -398,13 +408,15 @@ async def find_backup(
             BACKUP_PLAYER_TYPES.index(token.player_type),
         )
 
-    best = min(usable, key=rank)
-    return BackupCandidate(
-        player_type=best.player_type,
-        quality=best.quality,
-        url=best.url,
-        playlist=best.playlist,
-        is_bridge=best.is_bridge,
-        found_at=best.checked_at or now,
-        seasoned=best.seasoned(now),
-    )
+    return [
+        BackupCandidate(
+            player_type=token.player_type,
+            quality=token.quality,
+            url=token.url,
+            playlist=token.playlist,
+            is_bridge=token.is_bridge,
+            found_at=token.checked_at or now,
+            seasoned=token.seasoned(now),
+        )
+        for token in sorted(usable, key=rank)
+    ]

@@ -84,6 +84,14 @@ class PlaybackPolicy:
     # ad-free mode: nothing should ever be black there (see `_session_playlist`).
     hold: bool
     ad_spoofing: bool
+    # How long uncovered advertising may wait for a clean backup before it is
+    # held on black (see `stream_session._advance`). Zero for ffmpeg, which
+    # declares a live playlist dead the moment it stops growing; a browser
+    # player sits seconds behind the edge and can afford to wait.
+    hold_grace: float = 0.0
+    # TARGETDURATION to declare instead of Twitch's 6, so the client polls -
+    # and the session advances - on every real segment. None keeps upstream's.
+    target_duration: float | None = None
 
 
 def policy_from_settings(settings: ResolvedSettings) -> PlaybackPolicy:
@@ -255,7 +263,7 @@ def _make_backup_finder(
         full_quality_only: bool = False,
         native_url: str | None = None,
     ):
-        return await adblock.find_backup(
+        return await adblock.find_backups(
             login=login,
             quality=quality,
             native_player_type=resolver.resolve_player_type(
@@ -417,6 +425,8 @@ async def _session_playlist(
                 # trying to eliminate.
                 # (`policy.hold` is off in that mode, so `hold_uri` is None.)
                 hold_uri=hold_uri,
+                hold_grace=policy.hold_grace,
+                target_duration=policy.target_duration,
             ),
             timeout=PLAYLIST_DEADLINE_SECONDS,
         )
